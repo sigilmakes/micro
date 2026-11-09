@@ -5,8 +5,8 @@ An out-of-process tree-sitter highlighter for the micro fork's
 more tree-sitter highlight queries, and returns single-line byte spans. The
 Lua plugin owns the helper process and forwards spans to the editor.
 
-Fourteen micro filetypes are linked: Go, Python, JavaScript, TypeScript,
-Rust, C, C++, shell, JSON, TOML, HTML, CSS, Lua, and YAML. Grammars and
+Fifteen micro filetypes are linked: Go, Python, JavaScript, TypeScript,
+Rust, C, C++, shell, JSON, TOML, HTML, CSS, Lua, YAML, and Nix. Grammars and
 queries are data in a registry, so adding a language does not change the
 parse, span, or protocol code.
 
@@ -21,6 +21,8 @@ the helper removes tree-sitter entirely.
 | `cmd/micro-treesitter/` | helper binary: stdin/stdout protocol loop |
 | `internal/protocol/` | frame reader/writer |
 | `internal/tsprovider/` | grammar registry, parse sessions, span flattening |
+| `internal/grammars/nix/` | cgo shim for the vendored Nix parser |
+| `third_party/tree-sitter-nix/` | Nix parser C source and license |
 | `queries/<grammar>/` | upstream `highlights.scm` files and licenses |
 | `runtime/plugins/treesitter/` | Lua plugin and `repo.json` |
 | `testdata/` | samples, standalone helper driver, Lua harness |
@@ -63,7 +65,7 @@ lua5_1 testdata/lua_harness.lua
 `internal/tsprovider.definitions` is the registry. Each `Definition` carries
 a grammar id, the micro filetypes it serves, its query file names, and a
 language constructor. A language is linked by adding its Go module to
-`go.mod`, one definition, and a query directory.
+`go.mod` (or vendoring its C source), one definition, and a query directory.
 
 | micro filetype | grammar id | module | query layers |
 |---|---|---|---|
@@ -81,6 +83,7 @@ language constructor. A language is linked by adding its Go module to
 | `css` | `css` | `tree-sitter-css` | `highlights.scm` |
 | `lua` | `lua` | `tree-sitter-lua` | `highlights.scm` |
 | `yaml` | `yaml` | `tree-sitter-yaml` | `highlights.scm` |
+| `nix` | `nix` | `tree-sitter-nix` (vendored C) | `highlights.scm` |
 
 Micro's `typescript` filetype matches both `.ts` and `.tsx`, so the TSX
 grammar serves it. TSX parses plain TypeScript too, and one grammar keeps

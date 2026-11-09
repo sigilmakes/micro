@@ -136,6 +136,7 @@ func TestLanguageSpans(t *testing.T) {
 		{"css", "body { color: red; } /* note */\n", []want{{"body", "symbol.tag"}, {"note", "comment"}}},
 		{"lua", "local s = \"alpha\" -- note\n", []want{{"alpha", "constant.string"}, {"note", "comment"}}},
 		{"yaml", "name: alpha\nenabled: true\n", []want{{"alpha", "constant.string"}, {"true", "constant.bool"}}},
+		{"nix", "{ pkgs, ... }: { services.foo.enable = true; # note\n}\n", []want{{"note", "comment"}, {"pkgs", "identifier"}}},
 	}
 
 	engine := New("../../queries")

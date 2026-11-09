@@ -35,6 +35,7 @@ local PROVIDERS = {
     { filetype = "css", filename = [[\.(css|scss)$]] },
     { filetype = "lua", filename = [[\.lua$]] },
     { filetype = "yaml", filename = [[\.ya?ml$]] },
+    { filetype = "nix", filename = [[\.nix$]] },
 }
 
 local job = nil

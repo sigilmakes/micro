@@ -15,6 +15,8 @@ import (
 	"strings"
 	"unsafe"
 
+	"micro-treesitter/internal/grammars/nix"
+
 	tslua "github.com/tree-sitter-grammars/tree-sitter-lua/bindings/go"
 	tstoml "github.com/tree-sitter-grammars/tree-sitter-toml/bindings/go"
 	tsyaml "github.com/tree-sitter-grammars/tree-sitter-yaml/bindings/go"
@@ -72,6 +74,7 @@ var definitions = []Definition{
 	{ID: "css", Filetypes: []string{"css"}, Queries: []string{"highlights.scm"}, Language: language(tscss.Language)},
 	{ID: "lua", Filetypes: []string{"lua"}, Queries: []string{"highlights.scm"}, Language: language(tslua.Language)},
 	{ID: "yaml", Filetypes: []string{"yaml"}, Queries: []string{"highlights.scm"}, Language: language(tsyaml.Language)},
+	{ID: "nix", Filetypes: []string{"nix"}, Queries: []string{"highlights.scm"}, Language: language(nix.Language)},
 }
 
 func language(constructor func() unsafe.Pointer) func() *sitter.Language {

@@ -756,6 +756,9 @@ var HighlightDebounce = 25 * time.Millisecond
 // timer goroutine.
 var MainThread = func(f func()) { f() }
 
+// plainMatch is shared by unstyled lines. It is never mutated after init.
+var plainMatch = syntax.LineMatch{0: syntax.NoGroup}
+
 type highlightSession struct {
 	provider   *syntax.Provider
 	filetype   string
@@ -999,13 +1002,13 @@ func (b *SharedBuffer) ApplySpans(gen uint64, spans []syntax.Span) bool {
 		if lineSpans, ok := byLine[i]; ok {
 			m := syntax.BuildMatch(b.LineBytes(i), lineSpans)
 			if m == nil {
-				m = syntax.LineMatch{0: syntax.NoGroup}
+				m = plainMatch
 			}
 			b.SetMatch(i, m)
 		} else {
 			// An explicit index-0 entry stops the previous line's style
 			// from bleeding into an unstyled line.
-			b.SetMatch(i, syntax.LineMatch{0: syntax.NoGroup})
+			b.SetMatch(i, plainMatch)
 		}
 	}
 

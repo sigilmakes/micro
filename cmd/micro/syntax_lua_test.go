@@ -22,6 +22,21 @@ func TestLuaSyntaxProviderEndToEnd(t *testing.T) {
 		t.Fatalf("demo provider not registered: %v", syntax.ProviderNames())
 	}
 
+	// The embedded tree-sitter plugin also claims Go. This test exercises the
+	// Lua provider bridge, so suspend any other Go provider while it runs.
+	var suspended []*syntax.Provider
+	for _, p := range syntax.Providers() {
+		if p.Name != "gosyntax.go-hardcoded" && p.Match.FileType == "go" {
+			suspended = append(suspended, p)
+			syntax.Unregister(p.Name)
+		}
+	}
+	t.Cleanup(func() {
+		for _, p := range suspended {
+			syntax.Register(p)
+		}
+	})
+
 	path := filepath.Join(t.TempDir(), "demo.go")
 	content := "package main\n\nfunc main() {\n\tprintln(\"hi\", 42)\n}\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {

@@ -536,8 +536,7 @@ or disable them:
 * `comment`: provides automatic commenting for a number of languages
 * `ftoptions`: alters some default options depending on the filetype
 * `linter`: provides extensible linting for many languages
-* `literate`: provides advanced syntax highlighting for the Literate
-   programming tool.
+* `gosyntax`: a small demo Go provider built on the `micro/syntax` API.
 * `status`: provides some extensions to the status line (integration with
    Git and more).
 * `diff`: integrates the `diffgutter` option with Git. If you are in a Git
@@ -582,6 +581,7 @@ so that you can see what the formatting should look like.
     "fileformat": "unix",
     "filetype": "unknown",
     "ftoptions": true,
+    "gosyntax": true,
     "helpsplit": "hsplit",
     "hlsearch": false,
     "hltaberrors": false,
@@ -594,7 +594,6 @@ so that you can see what the formatting should look like.
     "keepautoindent": false,
     "keymenu": false,
     "linter": true,
-    "literate": true,
     "matchbrace": true,
     "matchbraceleft": true,
     "matchbracestyle": "underline",

@@ -1,9 +1,14 @@
 # micro-treesitter
 
 An out-of-process tree-sitter highlighter for the micro fork's
-`micro/syntax` provider API. The Go helper parses a document, runs a
-tree-sitter highlight query, and returns single-line byte spans. The Lua
-plugin owns the helper process and forwards spans to the editor.
+`micro/syntax` provider API. The Go helper parses a document, runs one or
+more tree-sitter highlight queries, and returns single-line byte spans. The
+Lua plugin owns the helper process and forwards spans to the editor.
+
+Fourteen micro filetypes are linked: Go, Python, JavaScript, TypeScript,
+Rust, C, C++, shell, JSON, TOML, HTML, CSS, Lua, and YAML. Grammars and
+queries are data in a registry, so adding a language does not change the
+parse, span, or protocol code.
 
 This is the first provider extension for the fork: it keeps cgo, grammars,
 queries, and capture names out of the editor core. Removing the plugin and
@@ -15,24 +20,31 @@ the helper removes tree-sitter entirely.
 |---|---|
 | `cmd/micro-treesitter/` | helper binary: stdin/stdout protocol loop |
 | `internal/protocol/` | frame reader/writer |
-| `internal/tsprovider/` | grammars, queries, parse sessions, span flattening |
-| `queries/go/highlights.scm` | Go highlight query, copied from tree-sitter-go v0.25.0 (MIT) |
+| `internal/tsprovider/` | grammar registry, parse sessions, span flattening |
+| `queries/<grammar>/` | upstream `highlights.scm` files and licenses |
 | `runtime/plugins/treesitter/` | Lua plugin and `repo.json` |
-| `testdata/` | Go sample, standalone helper driver, Lua harness |
+| `testdata/` | samples, standalone helper driver, Lua harness |
 
 ## Build and test
 
 The helper uses cgo through `github.com/tree-sitter/go-tree-sitter` and the
-official Go grammar binding:
+grammars' Go bindings:
 
 ```sh
-nix shell nixpkgs#go_1_27 -c bash -lc 'CGO_ENABLED=1 go build ./cmd/micro-treesitter'
+nix shell nixpkgs#go_1_27 -c bash -lc 'CGO_ENABLED=1 go build ./...'
 nix shell nixpkgs#go_1_27 -c bash -lc 'CGO_ENABLED=1 go test ./...'
+nix shell nixpkgs#go_1_27 -c bash -lc 'CGO_ENABLED=1 go vet ./...'
 ```
 
 A C compiler must be available to cgo. On this machine the build was also
 verified with `nix shell nixpkgs#go_1_27 nixpkgs#gcc`; `CGO_CFLAGS=-O2` is
 optional and only affects parse throughput.
+
+Build the helper binary at the module root:
+
+```sh
+nix shell nixpkgs#go_1_27 -c bash -lc 'CGO_ENABLED=1 go build -o micro-treesitter ./cmd/micro-treesitter'
+```
 
 Drive the helper directly:
 
@@ -46,23 +58,52 @@ Check the Lua state machine without micro:
 lua5_1 testdata/lua_harness.lua
 ```
 
-## Grammar and query lookup
+## Grammar registry
 
-The helper reads `<grammar-dir>/<grammar>/highlights.scm`. The grammar
+`internal/tsprovider.definitions` is the registry. Each `Definition` carries
+a grammar id, the micro filetypes it serves, its query file names, and a
+language constructor. A language is linked by adding its Go module to
+`go.mod`, one definition, and a query directory.
+
+| micro filetype | grammar id | module | query layers |
+|---|---|---|---|
+| `go` | `go` | `tree-sitter-go` | `highlights.scm` |
+| `python` | `python` | `tree-sitter-python` | `highlights.scm` |
+| `javascript` | `javascript` | `tree-sitter-javascript` | `highlights.scm` |
+| `typescript` | `tsx` | `tree-sitter-typescript` | `javascript.scm`, `highlights.scm` |
+| `rust` | `rust` | `tree-sitter-rust` | `highlights.scm` |
+| `c` | `c` | `tree-sitter-c` | `highlights.scm` |
+| `c++` | `cpp` | `tree-sitter-cpp` | `c.scm`, `highlights.scm` |
+| `shell` | `bash` | `tree-sitter-bash` | `highlights.scm` |
+| `json` | `json` | `tree-sitter-json` | `highlights.scm` |
+| `toml` | `toml` | `tree-sitter-toml` | `highlights.scm` |
+| `html` | `html` | `tree-sitter-html` | `highlights.scm` |
+| `css` | `css` | `tree-sitter-css` | `highlights.scm` |
+| `lua` | `lua` | `tree-sitter-lua` | `highlights.scm` |
+| `yaml` | `yaml` | `tree-sitter-yaml` | `highlights.scm` |
+
+Micro's `typescript` filetype matches both `.ts` and `.tsx`, so the TSX
+grammar serves it. TSX parses plain TypeScript too, and one grammar keeps
+buffer switching from reloading a second parser. The TypeScript query only
+covers TypeScript-specific patterns, so the registry runs the JavaScript
+query first; the C++ registry entry does the same with the C query. This
+mirrors nvim-treesitter's inheritance without a query preprocessor.
+`queries/README.md` records every upstream repository, tag, and license.
+
+## Query lookup
+
+The helper reads the files listed by the definition from
+`<grammar-dir>/<grammar>/<name>` and concatenates them in order. The grammar
 directory is resolved in this order:
 
 1. `--grammar-dir` flag
 2. `MICRO_TS_GRAMMAR_DIR`
 3. `./queries`
 
-`<grammar-dir>/<grammar>.scm` and `<grammar-dir>/highlights.scm` are accepted
-as fallbacks, so a single-grammar directory also works. A missing or invalid
-query becomes an `ERR` reply for that filetype; the helper keeps running.
-
-Only the Go grammar is linked in this version. `filetype` is mapped to a
-grammar through `internal/tsprovider.filetypeGrammar`; adding a language means
-adding its Go module to `go.mod`, one `grammarLanguages` entry, one mapping
-entry, a query directory, and a second Lua `syntax.register` call.
+For `highlights.scm`, `<grammar-dir>/<grammar>.scm` and
+`<grammar-dir>/highlights.scm` are accepted as fallbacks, so a
+single-grammar directory also works. A missing or invalid query becomes an
+`ERR` reply for that filetype; the helper keeps running.
 
 ## Wire protocol
 
@@ -119,7 +160,8 @@ Capture names are resolved by longest dotted prefix through
 `internal/tsprovider.captureGroups`. The groups emitted are limited to names
 that micro colorschemes define (`comment`, `identifier`, `constant`,
 `statement`, `symbol`, `preproc`, `type`, `special`, `error`, `todo` and their
-subgroups). Unknown captures produce no span. The main mappings:
+subgroups). Unknown captures produce no span. The mapping is shared by every
+language; there are no per-language keyword tables. The main mappings:
 
 | tree-sitter capture | micro group |
 |---|---|
@@ -129,7 +171,7 @@ subgroups). Unknown captures produce no span. The main mappings:
 | `number*` | `constant.number` |
 | `constant`, `constant.macro` | `constant` |
 | `constant.builtin`, `boolean` | `constant.bool` |
-| `keyword*` | `statement` (Go keywords are refined below) |
+| `keyword*` | `statement` |
 | `keyword.function/type/import/package/declaration` | `preproc` |
 | `function*`, `variable*`, `parameter`, `property`, `identifier` | `identifier` |
 | `function.builtin`, `function.macro` | `preproc` |
@@ -142,36 +184,29 @@ subgroups). Unknown captures produce no span. The main mappings:
 | `error` | `error` |
 | `todo`, `comment.todo`, `comment.warning` | `todo` |
 
-The Go grammar emits one generic `@keyword` capture for every keyword. The
-helper refines the keyword text using the old `go.yaml` vocabulary: `package`,
-`import`, `const`, `var`, `type`, `struct`, `func`, `interface`, `map`,
-`chan`, `defer` become `preproc`; `break`, `case`, `continue`, `default`,
-`go`, `goto`, `range`, `return`, `fallthrough` become `special`; `else`,
-`for`, `if`, `switch`, `select` stay `statement`.
-
 ## Lua plugin
 
-`runtime/plugins/treesitter/treesitter.lua` registers one provider:
+`runtime/plugins/treesitter/treesitter.lua` registers one provider per
+filetype from a table:
 
 ```lua
-{
-    name = "treesitter-go",
-    filetype = "go",
-    filename = "\\.go$",
-    priority = 100,
-    request = request,   -- request(ctx, reply)
-}
+{ name = "treesitter-go", filetype = "go", filename = [[\.go$]], priority = 100, request = request }
 ```
 
-On `init` it spawns `$MICRO_TS` if set, otherwise `micro-treesitter` from
-`PATH`. It logs once and disables highlighting when the helper exits before
-serving requests. On `deinit` it stops the job and drops pending replies.
+All providers share one request function and one helper process. The C++
+entry also carries a signature regexp so content-based detection still
+picks C++ over C for ambiguous headers. A filetype the helper does not link
+answers `ERR`; the plugin logs that filetype once and clears its spans.
 
-The plugin keeps one helper process for all buffers and routes replies by
-`ctx.id`. A pending reply is stored per id with its generation; a `SPANS` or
-`ERR` frame is delivered only when the generation matches. Chunk boundaries
-from the process pipe are arbitrary; the plugin buffers stdout and reassembles
-frames line by line.
+On `init` the plugin spawns `$MICRO_TS` if set, otherwise `micro-treesitter`
+from `PATH`. It logs once and disables highlighting when the helper exits
+before serving requests. On `deinit` it stops the job and drops pending
+replies.
+
+The plugin routes replies by `ctx.id`. A pending reply is stored per id with
+its generation; a `SPANS` or `ERR` frame is delivered only when the
+generation matches. Chunk boundaries from the process pipe are arbitrary;
+the plugin buffers stdout and reassembles frames line by line.
 
 Install the helper on `PATH` through your package manager, or set:
 
@@ -199,20 +234,17 @@ string, a struct tag, and UTF-8 identifiers. The helper's reply begins:
 
 ```text
 SPANS	1	1	39
-0	0	7	preproc
+0	0	7	statement
 2	0	42	comment
 3	0	16	comment
 4	0	17	comment
 5	0	11	comment
-6	0	4	preproc
+6	0	4	statement
 6	5	11	type
-6	12	18	preproc
+6	12	18	statement
 7	1	4	identifier
 7	6	12	type
 7	13	35	constant.string
-11	0	4	preproc
-...
-16	1	7	special
 ...
 ```
 
@@ -222,32 +254,44 @@ are split across their lines.
 
 ## Deliberate choices and deviations
 
-- `ERR` replies with a matching generation call `reply({})` after logging, so
-  a failed refresh cannot leave spans from a previous generation on screen.
+- `typescript` uses the TSX grammar because micro does not distinguish `.ts`
+  from `.tsx`. `c++` uses `cpp` and `shell` uses `bash`, matching the
+  filetype table.
+- The Go keyword vocabulary was removed. The old `go.yaml` split declarations
+  from control flow; the generic `keyword*` mapping now paints all upstream
+  `@keyword` captures as `statement`. Per-language keyword tables would have
+  to be maintained for fourteen grammars.
+- Query inheritance is expressed as ordered query files rather than a
+  `; inherits:` preprocessor. The copied files remain verbatim.
+- `ERR` replies with a matching generation call `reply({})` after logging
+  once per filetype, so a failed refresh cannot leave spans from a previous
+  generation on screen.
 - `ctx.id` is used as the numeric request key. If a core build omits it, the
   plugin derives a stable numeric id per buffer handle; that keeps the helper
   usable but is intended only as a compatibility fallback.
 - A malformed request header is answered with `ERR` and the helper exits,
   because the unread payload length is unknown. The plugin never sends one.
 - The helper reparses incrementally even though v1 permits a full reparse on
-  every request. A differential test compares incremental spans with a fresh
-  parse over random edits, including UTF-8 and invalid UTF-8 bytes.
+  every request. Differential tests compare incremental spans with a fresh
+  parse over random edits for Go and Python, including UTF-8 and invalid
+  UTF-8 bytes.
 - Request handling is sequential and has no timeout. A helper that hangs will
   eventually block `JobSend` in the editor. Process supervision beyond the
   exit callback (restart with backoff, watchdog) is not implemented.
-- `queries/go/highlights.scm` and `queries/go/LICENSE` are copied from
-  tree-sitter-go v0.25.0.
 
 ## Known gaps
 
-- Only Go is linked. Other filetypes get an `ERR`, and the plugin only
-  registers `go`.
-- Queries run over the whole document; there is no windowed query, no
-  debounce policy in the plugin (core owns the request cadence), and no
-  injections or embedded languages.
+- No injections or embedded languages. HTML `<script>`/`<style>` content,
+  JavaScript template substitutions inside other languages, and similar
+  regions are not highlighted by a second grammar.
+- Grammars are linked at build time. There is no dynamic parser loading,
+  plugin grammar registry, or runtime download.
+- Queries run over the whole document; there is no viewport or windowed
+  query, and the previous tree only saves reparsing, not re-querying.
+- The plugin has no debounce policy (core owns the request cadence) and no
+  per-provider failure recovery beyond the helper's process exit callback.
 - One helper serves all buffers. A helper crash disables highlighting until
   the plugin is reloaded.
-- Spans are generated from the whole tree on every request; the previous tree
-  only saves reparsing, not re-querying.
-- No grammar manifest. Distribution must provide `queries/<grammar>/highlights.scm`
-  and set `MICRO_TS_GRAMMAR_DIR`; there is no compiled default path.
+- No grammar manifest compiled into the helper. Distribution must provide
+  `queries/<grammar>/<query>.scm` and set `MICRO_TS_GRAMMAR_DIR`; there is no
+  compiled default path.

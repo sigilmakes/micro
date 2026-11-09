@@ -7,12 +7,12 @@
 local logs = {}
 local sent = {}
 local stops = 0
-local registered
+local registered = {}
 local onStdout, onStderr, onExit
 
 function import(name)
     if name == "micro/syntax" then
-        return { register = function(provider) registered = provider end }
+        return { register = function(provider) registered[#registered + 1] = provider end }
     elseif name == "micro/shell" then
         return {
             JobSpawn = function(command, args, out, err, exit)
@@ -25,7 +25,7 @@ function import(name)
     elseif name == "micro" then
         return { Log = function(...) logs[#logs + 1] = table.concat({ ... }, " ") end }
     elseif name == "os" then
-        return { getenv = function() return nil end }
+        return { Getenv = function() return nil end }
     end
     error("unexpected import: " .. name)
 end
@@ -50,18 +50,44 @@ local function joinFlat(spans)
     return table.concat(parts, "|")
 end
 
+local function providerFor(filetype)
+    for _, provider in ipairs(registered) do
+        if provider.filetype == filetype then
+            return provider
+        end
+    end
+    return nil
+end
+
+local function countLogs(fragment)
+    local n = 0
+    for _, line in ipairs(logs) do
+        if line:find(fragment, 1, true) then n = n + 1 end
+    end
+    return n
+end
+
 init()
-check(registered ~= nil, "provider was not registered")
-check(registered.name == "treesitter-go", "provider name")
-check(registered.filetype == "go", "provider filetype")
-check(registered.filename == "\\.go$", "provider filename regex")
-check(registered.priority == 100, "provider priority")
+check(#registered == 14, "expected 14 providers, got " .. #registered)
+local go = providerFor("go")
+check(go ~= nil, "go provider was not registered")
+check(go.name == "treesitter-go", "provider name")
+check(go.filename == "\\.go$", "provider filename regex")
+check(go.priority == 100, "provider priority")
+for _, filetype in ipairs({ "go", "python", "javascript", "typescript", "rust", "c",
+    "c++", "shell", "json", "toml", "html", "css", "lua", "yaml" }) do
+    local provider = providerFor(filetype)
+    check(provider ~= nil, "missing provider for " .. filetype)
+    check(provider.name == "treesitter-" .. filetype, "wrong name for " .. filetype)
+    check(provider.request == go.request, "provider request function is not shared")
+end
+check(providerFor("c++").signature ~= nil, "c++ signature missing")
 
 -- Frame framing: exact bytes, byte length, id and generation from ctx.
 local delivered
 local function reply(spans) delivered = spans end
 local text = "package x\n"
-registered.request({ id = 1, generation = 5, filetype = "go", text = text }, reply)
+go.request({ id = 1, generation = 5, filetype = "go", text = text }, reply)
 check(#sent == 1, "expected one REQ frame, got " .. #sent)
 local wantFrame = "REQ\t1\t5\tgo\t10\n" .. text
 check(sent[1] == wantFrame, string.format("frame mismatch: %q", sent[1]))
@@ -78,29 +104,29 @@ check(joinFlat(delivered) == "0|0|7|preproc|1|0|1|comment",
 
 -- A stale generation must not overwrite the newer pending reply.
 delivered = nil
-registered.request({ id = 1, generation = 6, filetype = "go", text = text }, reply)
+go.request({ id = 1, generation = 6, filetype = "go", text = text }, reply)
 feed("SPANS\t1\t5\t0\n")
 check(delivered == nil, "stale generation was delivered")
 feed("SPANS\t1\t6\t0\n")
 check(delivered ~= nil and #delivered == 0, "current generation clears spans")
 
--- ERR for the current generation clears spans and logs once.
+-- ERR for the current generation clears spans and logs once per filetype.
 delivered = nil
-registered.request({ id = 1, generation = 7, filetype = "go", text = text }, reply)
-feed("ERR\t1\t7\tquery failed\n")
+go.request({ id = 1, generation = 7, filetype = "ruby", text = "puts 1\n" }, reply)
+feed("ERR\t1\t7\tunsupported filetype \"ruby\"\n")
 check(delivered ~= nil and #delivered == 0, "ERR should clear spans")
-local sawError = false
-for _, line in ipairs(logs) do
-    if line:find("query failed", 1, true) then sawError = true end
-end
-check(sawError, "ERR was not logged")
+check(countLogs("ruby unavailable") == 1, "ERR was not logged exactly once")
+delivered = nil
+go.request({ id = 1, generation = 8, filetype = "ruby", text = "puts 1\n" }, reply)
+feed("ERR\t1\t8\tunsupported filetype \"ruby\"\n")
+check(countLogs("ruby unavailable") == 1, "repeated ERR was logged again")
 
 -- Unknown frames are a protocol failure: the helper is stopped and disabled.
 local stopsBefore = stops
-feed("WHAT\t1\t7\tnonsense\n")
+feed("WHAT\t1\t8\tnonsense\n")
 check(stops == stopsBefore + 1, "unknown frame did not stop the helper")
 delivered = nil
-registered.request({ id = 1, generation = 8, filetype = "go", text = text }, reply)
+go.request({ id = 1, generation = 9, filetype = "go", text = text }, reply)
 check(delivered ~= nil and #delivered == 0, "disabled plugin must still answer")
 
 deinit()

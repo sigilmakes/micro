@@ -1,7 +1,7 @@
 [
   {
     "Name": "treesitter",
-    "Description": "Tree-sitter highlighting for Go through an external helper",
+    "Description": "Tree-sitter highlighting for Go, Python, JavaScript/TypeScript, Rust, C/C++, shell, JSON, TOML, HTML, CSS, Lua, and YAML through an external helper",
     "Website": "https://github.com/tree-sitter/tree-sitter"
   }
 ]

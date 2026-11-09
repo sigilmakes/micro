@@ -1,21 +1,46 @@
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
--- Tree-sitter highlighting for Go, driving an out-of-process helper.
--- The helper owns parsing, the grammar, the query, and capture mapping; this
+-- Tree-sitter highlighting for the filetypes linked into the helper.
+-- The helper owns parsing, grammars, queries, and capture mapping; this
 -- plugin owns the process, request framing, and reply generation checks.
+--
+-- One provider is registered per filetype. They all share one helper process
+-- and one request function, so a buffer switch does not restart the helper.
 
 local syntax = import("micro/syntax")
 local shell = import("micro/shell")
 local micro = import("micro")
 local os = import("os")
 
-local PROVIDER_NAME = "treesitter-go"
-local PROVIDER_FILETYPE = "go"
+-- Mirrors pkg/filetype/table.go for micro's tree-sitter filetypes.
+local PROVIDERS = {
+    { filetype = "go", filename = [[\.go$]] },
+    { filetype = "python", filename = [[\.py(3|w)?$]] },
+    { filetype = "javascript", filename = [[(\.(m|c)?js$|\.es[5678]?$)]] },
+    { filetype = "typescript", filename = [[\.tsx?$]] },
+    { filetype = "rust", filename = [[\.rs$]] },
+    { filetype = "c", filename = [[(\.(c|C)$|\.(h|H)$|\.ii?$|\.(def)$)]] },
+    {
+        filetype = "c++",
+        filename = [[(\.c(c|pp|xx)$|\.h(h|pp|xx)?$|\.ii?$|\.(def)$)]],
+        signature = [[\b(namespace|class|public|protected|private|template|constexpr|noexcept|nullptr|throw)\b]],
+    },
+    {
+        filetype = "shell",
+        filename = [[(\.(sh|bash|ash|ebuild)$|(\.bash(rc|_aliases|_functions|_profile)|\.?profile|Pkgfile|pkgmk\.conf|rc\.conf|PKGBUILD|APKBUILD)$|bash-fc\.)]],
+    },
+    { filetype = "json", filename = [[\.jsonc?$]] },
+    { filetype = "toml", filename = [[\.toml$]] },
+    { filetype = "html", filename = [[\.htm[l]?$]] },
+    { filetype = "css", filename = [[\.(css|scss)$]] },
+    { filetype = "lua", filename = [[\.lua$]] },
+    { filetype = "yaml", filename = [[\.ya?ml$]] },
+}
 
 local job = nil
 local disabled = false
 local logged = false
-local providerRegistered = false
+local providersRegistered = false
 local spawnGeneration = 0
 local helperPath = nil
 
@@ -24,7 +49,7 @@ local collecting = nil
 local replies = {}
 local bufferIDs = {}
 local nextBufferID = 0
-local lastHelperError = nil
+local errorLogged = {}
 
 local function logOnce(message)
     if not logged then
@@ -53,16 +78,16 @@ local function deliver(id, generation, spans, errMessage)
     end
     replies[id] = nil
     if errMessage ~= nil then
-        if errMessage ~= lastHelperError then
-            lastHelperError = errMessage
-            micro.Log("treesitter: helper error: " .. errMessage)
+        local filetype = pending.filetype or ""
+        if not errorLogged[filetype] then
+            errorLogged[filetype] = true
+            micro.Log("treesitter: " .. filetype .. " unavailable: " .. errMessage)
         end
         -- A failed request carries no spans. Clear the previous ones so the
         -- buffer is never coloured from a stale generation.
         pcall(pending.reply, {})
         return
     end
-    lastHelperError = nil
     local ok, err = pcall(pending.reply, spans)
     if not ok then
         micro.Log("treesitter: reply failed: " .. tostring(err))
@@ -181,9 +206,9 @@ local function request(ctx, reply)
     end
     local id = bufferID(ctx)
     local generation = ctx.generation or 0
-    local filetype = ctx.filetype or PROVIDER_FILETYPE
+    local filetype = ctx.filetype or ""
     local text = ctx.text or ""
-    replies[id] = { generation = generation, reply = reply }
+    replies[id] = { generation = generation, reply = reply, filetype = filetype }
     local frame = "REQ\t" .. id .. "\t" .. tostring(generation) .. "\t"
         .. filetype .. "\t" .. tostring(#text) .. "\n" .. text
     shell.JobSend(job, frame)
@@ -212,7 +237,6 @@ local function startHelper()
         if #detail > 400 then
             detail = detail:sub(1, 400) .. "..."
         end
-        lastHelperError = detail
         micro.Log("treesitter: " .. detail)
     end
 
@@ -240,6 +264,32 @@ local function startHelper()
     job = shell.JobSpawn(helperPath, {}, onStdout, onStderr, onExit)
 end
 
+local function registerProviders()
+    local failed = false
+    for _, spec in ipairs(PROVIDERS) do
+        local ok, err = pcall(syntax.register, {
+            name = "treesitter-" .. spec.filetype,
+            filetype = spec.filetype,
+            filename = spec.filename,
+            signature = spec.signature,
+            priority = 100,
+            request = request,
+        })
+        if not ok then
+            failed = true
+            micro.Log("treesitter: register " .. spec.filetype .. ": " .. tostring(err))
+        end
+    end
+    if failed then
+        disabled = true
+        if job ~= nil then
+            stopJob(spawnGeneration)
+        end
+    else
+        providersRegistered = true
+    end
+end
+
 function init()
     if syntax == nil then
         logOnce("this micro build has no micro/syntax provider API")
@@ -252,7 +302,7 @@ function init()
 
     disabled = false
     logged = false
-    lastHelperError = nil
+    errorLogged = {}
     helperPath = os.Getenv("MICRO_TS")
     if helperPath == nil or helperPath == "" then
         helperPath = "micro-treesitter"
@@ -260,24 +310,8 @@ function init()
 
     startHelper()
 
-    if providerRegistered then
-        return
-    end
-    local ok, err = pcall(syntax.register, {
-        name = PROVIDER_NAME,
-        filetype = PROVIDER_FILETYPE,
-        filename = "\\.go$",
-        priority = 100,
-        request = request,
-    })
-    if not ok then
-        disabled = true
-        logOnce("register failed: " .. tostring(err))
-        if job ~= nil then
-            stopJob(spawnGeneration)
-        end
-    else
-        providerRegistered = true
+    if not providersRegistered then
+        registerProviders()
     end
 end
 
@@ -294,6 +328,6 @@ function deinit()
     nextBufferID = 0
     disabled = false
     logged = false
-    providerRegistered = false
-    lastHelperError = nil
+    providersRegistered = false
+    errorLogged = {}
 end

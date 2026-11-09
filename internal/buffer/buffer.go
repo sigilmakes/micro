@@ -930,15 +930,18 @@ func (b *SharedBuffer) highlightTick() {
 	req.Reply = func(spans []syntax.Span) {
 		b.ApplySpans(req.Generation, spans)
 	}
-	req.Fail = func(err error) {
+	req.Fail = func(error) {
 		if b.hl != h || h.closed || h.requestGen != req.Generation {
 			return
 		}
 		h.inFlight = false
-		h.dirty = false
-		if err != nil {
-			log.Println("syntax provider", h.provider.Name, "failed:", err)
+		if b.hlGen != req.Generation {
+			if h.dirty {
+				b.scheduleHighlight()
+			}
+			return
 		}
+		h.dirty = false
 	}
 
 	p := h.provider
@@ -994,9 +997,15 @@ func (b *SharedBuffer) ApplySpans(gen uint64, spans []syntax.Span) bool {
 
 	for i := 0; i < b.LinesNum(); i++ {
 		if lineSpans, ok := byLine[i]; ok {
-			b.SetMatch(i, syntax.BuildMatch(b.LineBytes(i), lineSpans))
+			m := syntax.BuildMatch(b.LineBytes(i), lineSpans)
+			if m == nil {
+				m = syntax.LineMatch{0: syntax.NoGroup}
+			}
+			b.SetMatch(i, m)
 		} else {
-			b.SetMatch(i, nil)
+			// An explicit index-0 entry stops the previous line's style
+			// from bleeding into an unstyled line.
+			b.SetMatch(i, syntax.LineMatch{0: syntax.NoGroup})
 		}
 	}
 

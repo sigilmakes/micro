@@ -98,8 +98,8 @@ func TestApplySpansClearsUnmentionedLines(t *testing.T) {
 	if b.Match(0)[0] != g {
 		t.Fatal("line 0 not highlighted")
 	}
-	if b.Match(1) != nil {
-		t.Fatal("unmentioned line was not cleared")
+	if m := b.Match(1); len(m) != 1 || m[0] != syntax.NoGroup {
+		t.Fatalf("unmentioned line was not cleared: %v", m)
 	}
 }
 

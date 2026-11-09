@@ -6,9 +6,7 @@ import (
 	"strings"
 )
 
-//go:generate go run syntax/make_headers.go syntax
-
-//go:embed colorschemes help plugins syntax
+//go:embed colorschemes help plugins
 var runtime embed.FS
 
 func fixPath(name string) string {

@@ -26,16 +26,14 @@ code may be distributed across multiple Lua files. The `repo.json`
 file contains information about the plugin, such as the website,
 description, version, and any requirements. Plugins may also
 have additional files that can be added to micro's runtime files,
-of which there are 5 types:
+of which there are 3 types:
 
 * Colorschemes
-* Syntax files
 * Help files
 * Plugin files
-* Syntax header files
 
 In most cases, a plugin will want to add help files, but in certain
-cases a plugin may also want to add colorschemes or syntax files.
+cases a plugin may also want to add colorschemes.
 No directory structure is enforced, but keeping runtime files in their
 own directories is good practice.
 
@@ -207,7 +205,6 @@ The packages and their contents are listed below (in Go type signatures):
     - `NewRTFiletype() int`: creates a new RTFiletype, and returns its value.
 
     - `RTColorscheme`: runtime files for colorschemes.
-    - `RTSyntax`: runtime files for syntax files.
     - `RTHelp`: runtime files for help documents.
     - `RTPlugin`: runtime files for plugin source code.
 
@@ -372,6 +369,15 @@ The packages and their contents are listed below (in Go type signatures):
     Relevant links:
     [Rune](https://pkg.go.dev/builtin#rune)
 
+* `micro/syntax`
+    - `register(table)`: register a highlighting provider. The table needs
+       `name`, `request`, and usually `filetype`; optional fields are
+       `filename`, `header`, `signature`, and `priority`. See `> help syntax`.
+    - `unregister(name string)`: remove a provider.
+    - `invalidate(buf Buffer)`: request fresh spans for a buffer.
+    - `has_color(name string) bool`: whether the colorscheme defines a group.
+    - `providers() []string`: registered provider names.
+
 This may seem like a small list of available functions, but some of the objects
 returned by the functions have many methods. The Lua plugin may access any
 public methods of an object returned by any of the functions above.
@@ -458,7 +464,7 @@ The following functions from the go-humanize package are also available:
 [The Lua standard library](https://www.lua.org/manual/5.1/manual.html#5) is also
 available to plugins, though it is rather small.
 
-## Adding help files, syntax files, or colorschemes in your plugin
+## Adding help files or colorschemes in your plugin
 
 You can use the `AddRuntimeFile(name string, type config.RTFiletype,
                                 path string)`
@@ -487,8 +493,7 @@ The following plugins come pre-installed with micro:
 * `ftoptions`: alters some default options (notably indentation) depending on
    the filetype
 * `linter`: provides extensible linting for many languages
-* `literate`: provides advanced syntax highlighting for the Literate
-   programming tool.
+* `gosyntax`: a small demo Go provider built on the `micro/syntax` API.
 * `status`: provides some extensions to the status line (integration with
    Git and more).
 * `diff`: integrates the `diffgutter` option with Git. If you are in a Git

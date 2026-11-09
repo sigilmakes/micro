@@ -1,4 +1,4 @@
-.PHONY: runtime build generate build-quick
+.PHONY: runtime build build-quick
 
 VERSION = $(shell GOOS=$(shell go env GOHOSTOS) GOARCH=$(shell go env GOHOSTARCH) \
 	go run tools/build-version.go)
@@ -21,7 +21,7 @@ ifeq ($(GOHOSTOS), darwin)
 	CGO_ENABLED = 1
 endif
 
-build: generate build-quick
+build: build-quick
 
 build-quick:
 	CGO_ENABLED=$(CGO_ENABLED) go build -trimpath -ldflags "-s -w $(GOVARS) $(ADDITIONAL_GO_LINKER_FLAGS)" ./cmd/micro
@@ -33,16 +33,13 @@ build-tags: fetch-tags build
 
 build-all: build
 
-install: generate
+install:
 	go install -ldflags "-s -w $(GOVARS) $(ADDITIONAL_GO_LINKER_FLAGS)" ./cmd/micro
 
 install-all: install
 
 fetch-tags:
 	git fetch --tags --force
-
-generate:
-	GOOS=$(shell go env GOHOSTOS) GOARCH=$(shell go env GOHOSTARCH) go generate ./runtime
 
 testgen:
 	mkdir -p tools/vscode-tests

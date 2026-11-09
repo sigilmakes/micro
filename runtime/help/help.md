@@ -23,8 +23,8 @@ by pressing character keys.
 
 If the colorscheme doesn't look good, you can change it with
 `> set colorscheme ...`. You can press tab to see the available colorschemes,
-or see more information about colorschemes and syntax highlighting with `> help
-colors`.
+or see more information about colorschemes with `> help colors`, and about
+syntax highlighting with `> help syntax`.
 
 Press `Ctrl-w` to move between splits, and type `> vsplit filename` or
 `> hsplit filename` to open a new split.
@@ -49,8 +49,9 @@ Here are the available help topics:
 * `options`: Gives a list of all the options you can customize
 * `plugins`: Explains how micro's plugin system works and how to create your own
    plugins
-* `colors`: Explains micro's colorscheme and syntax highlighting engine and how
-   to create your own colorschemes or add new languages to the engine
+* `colors`: Explains micro's colorschemes and how to create your own
+* `syntax`: Explains how extensions provide syntax highlighting through the
+   `micro/syntax` Lua API
 * `copypaste`: Explains micro's copy and paste usage and configuration.
    It describes how copy and paste is working on different operating systems and
    setups.

@@ -128,8 +128,8 @@ quotes here but these are not necessary when entering the command in micro.
 
 * `plugin available`: show available plugins that can be installed.
 
-* `reload`: reloads all runtime files (settings, keybindings, syntax files,
-   colorschemes, plugins). All plugins will be unloaded by running their
+* `reload`: reloads all runtime files (settings, keybindings, colorschemes,
+   plugins). All plugins will be unloaded by running their
    `deinit()` function (if it exists), and then loaded again by calling the
    `preinit()`, `init()` and `postinit()` functions (if they exist).
 

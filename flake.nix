@@ -46,9 +46,6 @@
                                 self.shortRev or (self.dirtyShortRev or "unknown")
                             }"
                         ];
-                        preBuild = ''
-                            GOOS= GOARCH= go generate ./runtime
-                        '';
                         postInstall = ''
                             installManPage assets/packaging/micro.1
                             install -Dm444 assets/packaging/micro.desktop $out/share/applications/micro.desktop

@@ -43,7 +43,8 @@ You can also check out the website for Micro at https://micro-editor.github.io.
 - Simple autocompletion.
 - Persistent undo.
 - Automatic linting and error notifications.
-- Syntax highlighting for over [130 languages](runtime/syntax).
+- Extension-provided syntax highlighting through the `micro/syntax` Lua API,
+  with a demo Go provider in [runtime/plugins/gosyntax](runtime/plugins/gosyntax).
 - Color scheme support.
   - By default, micro comes with 16, 256, and true color themes.
 - True color support.

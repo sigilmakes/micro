@@ -1,10 +1,7 @@
 # Colors
 
-This help page aims to cover two aspects of micro's syntax highlighting engine:
-
-* How to create colorschemes and use them.
-* How to create syntax files to add to the list of languages micro can
-  highlight.
+This help page covers colorschemes. Syntax highlighting is provided by
+extensions; see `> help syntax` for the provider API.
 
 ## Colorschemes
 
@@ -212,11 +209,11 @@ be used.
 ---
 
 In addition to the main colorscheme groups, there are subgroups that you can
-specify by adding `.subgroup` to the group. If you're creating your own custom
-syntax files, you can make use of your own subgroups.
+specify by adding `.subgroup` to the group. Syntax providers can use their own
+subgroups.
 
-If micro can't match the subgroup, it'll default to the root group, so  it's
-safe and recommended to use subgroups in your custom syntax files.
+If micro can't match the subgroup, it'll default to the root group, so it's
+safe and recommended to use subgroups in providers.
 
 For example if `constant.string` is found in your colorscheme, micro will us
 that for highlighting strings. If it's not found, it will use constant instead.
@@ -225,7 +222,7 @@ definitions, so if, for example `constant.bool.true` is found then micro will
 use that. If `constant.bool.true` is not found but `constant.bool` is found
 micro will use `constant.bool`. If not, it uses `constant`.
 
-Here's a list of subgroups used in micro's built-in syntax files.
+Here's a list of subgroups commonly used by syntax providers.
 
 * comment.bright (Some filetypes have distinctions between types of comments)
 * constant.bool
@@ -254,173 +251,12 @@ colorscheme name as string to include a different colorscheme within a new one.
 Additionally the groups can then be extended or overwritten. The `default.micro`
 theme can be seen as an example, which links to the chosen default colorscheme.
 
-## Syntax files
+## Syntax highlighting
 
-The syntax files are written in yaml-format and specify how to highlight
-languages.
+Syntax highlighting is supplied by extensions through the `micro/syntax` Lua
+module. See `> help syntax` for the provider API, span units, matching rules,
+and the asynchronous reply contract.
 
-Micro's builtin syntax highlighting tries very hard to be sane, sensible and
-provide ample coverage of the meaningful elements of a language. Micro has
-syntax files built in for over 100 languages now! However, there may be
-situations where you find Micro's highlighting to be insufficient or not to
-your liking. The good news is that you can create your own syntax files, and
-place them in  `~/.config/micro/syntax` and Micro will use those instead.
-
-### Filetype definition
-
-You must start the syntax file by declaring the filetype:
-
-```yaml
-filetype: go
-```
-
-### Detect definition
-
-Then you must provide information about how to detect the filetype:
-
-```yaml
-detect:
-    filename: "\\.go$"
-```
-
-Micro will match this regex against a given filename to detect the filetype.
-
-In addition to the `filename` regex (or even instead of it) you can provide
-a `header` regex that will check the first line of the file. For example:
-
-```yaml
-detect:
-    filename: "\\.ya?ml$"
-    header: "%YAML"
-```
-
-This is useful in cases when the given file name is not sufficient to determine
-the filetype, e.g. with the above example, if a YAML file has no `.yaml`
-extension but may contain a `%YAML` directive in its first line.
-
-`filename` takes precedence over `header`, i.e. if there is a syntax file that
-matches the file with a filetype by the `filename` and another syntax file that
-matches the same file with another filetype by the `header`, the first filetype
-will be used.
-
-Finally, in addition to `filename` and/or `header` (but not instead of them)
-you may also provide an optional `signature` regex which is useful for resolving
-ambiguities when there are multiple syntax files matching the same file with
-different filetypes. If a `signature` regex is given, micro will match a certain
-amount of first lines in the file (this amount is determined by the `detectlimit`
-option) against this regex, and if any of the lines match, this syntax file's
-filetype will be preferred over other matching filetypes.
-
-For example, to distinguish C++ header files from C and Objective-C header files
-that have the same `.h` extension:
-
-```yaml
-detect:
-    filename: "\\.c(c|pp|xx)$|\\.h(h|pp|xx)?$"
-    signature: "namespace|template|public|protected|private"
-```
-
-### Syntax rules
-
-Next you must provide the syntax highlighting rules. There are two types of
-rules: patterns and regions. A pattern is matched on a single line and usually
-a single word as well. A region highlights between two patterns over multiple
-lines and may have rules of its own inside the region.
-
-Here are some example patterns in Go:
-
-```yaml
-rules:
-    - special: "\\b(break|case|continue|default|go|goto|range|return)\\b"
-    - statement: "\\b(else|for|if|switch)\\b"
-    - preproc: "\\b(package|import|const|var|type|struct|func|go|defer|iota)\\b"
-```
-
-The order of patterns does matter as patterns lower in the file will overwrite
-the ones defined above them.
-
-And here are some example regions for Go:
-
-```yaml
-- constant.string:
-    start: "\""
-    end: "\""
-    rules:
-        - constant.specialChar: "%."
-        - constant.specialChar: "\\\\[abfnrtv'\\\"\\\\]"
-        - constant.specialChar: "\\\\([0-7]{3}|x[A-Fa-f0-9]{2}|u[A-Fa-f0-9]{4}|U[A-Fa-f0-9]{8})"
-
-- comment:
-    start: "//"
-    end: "$"
-    rules:
-        - todo: "(TODO|XXX|FIXME):?"
-
-- comment:
-    start: "/\\*"
-    end: "\\*/"
-    rules:
-        - todo: "(TODO|XXX|FIXME):?"
-```
-
-Notice how the regions may contain rules inside of them. Any inner rules that
-are matched are then skipped when searching for the end of the region. For
-example, when highlighting `"foo \" bar"`, since `\"` is matched by an inner
-rule in the region, it is skipped. Likewise for `"foo \\" bar`, since `\\` is
-matched by an inner rule, it is skipped, and then the `"` is found and the
-string ends at the correct place.
-
-You may also explicitly mark skip regexes if you don't want them to be
-highlighted. For example:
-
-```yaml
-- constant.string:
-    start: "\""
-    end: "\""
-    skip: "\\."
-```
-
-#### Includes
-
-You may also include rules from other syntax files as embedded languages. For
-example, the following is possible for html:
-
-```yaml
-- default:
-    start: "<script.*?>"
-    end: "</script.*?>"
-    rules:
-        - include: "javascript"
-
-- default:
-    start: "<style.*?>"
-    end: "</style.*?>"
-    rules:
-        - include: "css"
-```
-
-Note that nested include (i.e. including syntax files that include other syntax
-files) is not supported yet.
-
-### Default syntax highlighting
-
-If micro cannot detect the filetype of the file, it falls back to using the
-default syntax highlighting for it, which highlights just the bare minimum:
-email addresses, URLs etc.
-
-Just like in other cases, you can override the default highlighting by adding
-your own custom `default.yaml` file to `~/.config/micro/syntax`.
-
-For example, if you work with various config files that use the `#` sign to mark
-the beginning of a comment, you can use the following custom `default.yaml` to
-highlight those comments by default:
-
-```yaml
-filetype: unknown
-
-detect:
-    filename: ""
-
-rules:
-    - comment: "(^|\\s)#.*$"
-```
+Micro still detects filetypes without any provider, so `filetype` settings,
+`ft:` options, the status line, and plugins such as `comment` and `linter`
+continue to work. A file with no provider simply has no highlighting.

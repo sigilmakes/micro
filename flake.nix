@@ -59,10 +59,37 @@
                             platforms = pkgs.lib.platforms.linux;
                         };
                     };
+                    micro-treesitter = (pkgs.buildGoModule.override { go = pkgs.go_1_27; }) {
+                        pname = "micro-treesitter";
+                        inherit version;
+                        src = ./treesitter;
+                        vendorHash = "sha256-NLIDNdtFiBE/vx21lrwAkAozP0mk5drVDDrZYnTcX70=";
+                        proxyVendor = true;
+                        subPackages = [ "cmd/micro-treesitter" ];
+                        env.CGO_ENABLED = "1";
+                        env.CGO_CFLAGS = "-O2";
+                        ldflags = [
+                            "-s"
+                            "-w"
+                            "-X main.defaultGrammarDir=${placeholder "out"}/share/micro/treesitter/grammars"
+                        ];
+                        postInstall = ''
+                            mkdir -p $out/share/micro/treesitter/grammars
+                            cp -r queries/*/ $out/share/micro/treesitter/grammars/
+                        '';
+                        meta = {
+                            description = "Tree-sitter highlight helper for micro";
+                            homepage = "https://github.com/micro-editor/micro";
+                            license = pkgs.lib.licenses.mit;
+                            mainProgram = "micro-treesitter";
+                            platforms = pkgs.lib.platforms.linux;
+                        };
+                    };
                 in
                 {
                     default = micro;
                     micro = micro;
+                    micro-treesitter = micro-treesitter;
                 }
             );
 

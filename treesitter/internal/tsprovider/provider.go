@@ -13,9 +13,23 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unsafe"
 
+	tslua "github.com/tree-sitter-grammars/tree-sitter-lua/bindings/go"
+	tstoml "github.com/tree-sitter-grammars/tree-sitter-toml/bindings/go"
+	tsyaml "github.com/tree-sitter-grammars/tree-sitter-yaml/bindings/go"
 	sitter "github.com/tree-sitter/go-tree-sitter"
+	tsbash "github.com/tree-sitter/tree-sitter-bash/bindings/go"
+	tsc "github.com/tree-sitter/tree-sitter-c/bindings/go"
+	tscpp "github.com/tree-sitter/tree-sitter-cpp/bindings/go"
+	tscss "github.com/tree-sitter/tree-sitter-css/bindings/go"
 	tsgo "github.com/tree-sitter/tree-sitter-go/bindings/go"
+	tshtml "github.com/tree-sitter/tree-sitter-html/bindings/go"
+	tsjavascript "github.com/tree-sitter/tree-sitter-javascript/bindings/go"
+	tsjson "github.com/tree-sitter/tree-sitter-json/bindings/go"
+	tspython "github.com/tree-sitter/tree-sitter-python/bindings/go"
+	tsrust "github.com/tree-sitter/tree-sitter-rust/bindings/go"
+	tstypescript "github.com/tree-sitter/tree-sitter-typescript/bindings/go"
 )
 
 // Span is one half-open, single-line byte range. Line is 0-based; Start and
@@ -27,17 +41,51 @@ type Span struct {
 	Group string
 }
 
-// filetypeGrammar names the tree-sitter grammar used for a micro filetype.
-var filetypeGrammar = map[string]string{
-	"go": "go",
+// Definition describes one linked grammar. Queries names files under
+// <grammarDir>/<ID>/ and is concatenated in order, so a dialect can layer its
+// own patterns over a base language. Filetypes are the micro filetypes from
+// pkg/filetype/table.go that this grammar serves.
+type Definition struct {
+	ID        string
+	Filetypes []string
+	Queries   []string
+	Language  func() *sitter.Language
 }
 
-// grammarLanguages links a grammar id to its compiled language. Adding a
-// grammar means adding a module to go.mod and one entry here.
-var grammarLanguages = map[string]func() *sitter.Language{
-	"go": func() *sitter.Language {
-		return sitter.NewLanguage(tsgo.Language())
-	},
+// definitions is the linked grammar registry. Adding a language means adding
+// its module to go.mod, one entry here, and its query directory.
+var definitions = []Definition{
+	{ID: "go", Filetypes: []string{"go"}, Queries: []string{"highlights.scm"}, Language: language(tsgo.Language)},
+	{ID: "python", Filetypes: []string{"python"}, Queries: []string{"highlights.scm"}, Language: language(tspython.Language)},
+	{ID: "javascript", Filetypes: []string{"javascript"}, Queries: []string{"highlights.scm"}, Language: language(tsjavascript.Language)},
+	// micro's "typescript" filetype covers both .ts and .tsx, so the TSX
+	// grammar serves it. TSX queries are layered over the JavaScript base.
+	{ID: "tsx", Filetypes: []string{"typescript"}, Queries: []string{"javascript.scm", "highlights.scm"}, Language: language(tstypescript.LanguageTSX)},
+	{ID: "rust", Filetypes: []string{"rust"}, Queries: []string{"highlights.scm"}, Language: language(tsrust.Language)},
+	{ID: "c", Filetypes: []string{"c"}, Queries: []string{"highlights.scm"}, Language: language(tsc.Language)},
+	{ID: "cpp", Filetypes: []string{"c++"}, Queries: []string{"c.scm", "highlights.scm"}, Language: language(tscpp.Language)},
+	{ID: "bash", Filetypes: []string{"shell"}, Queries: []string{"highlights.scm"}, Language: language(tsbash.Language)},
+	{ID: "json", Filetypes: []string{"json"}, Queries: []string{"highlights.scm"}, Language: language(tsjson.Language)},
+	{ID: "toml", Filetypes: []string{"toml"}, Queries: []string{"highlights.scm"}, Language: language(tstoml.Language)},
+	{ID: "html", Filetypes: []string{"html"}, Queries: []string{"highlights.scm"}, Language: language(tshtml.Language)},
+	{ID: "css", Filetypes: []string{"css"}, Queries: []string{"highlights.scm"}, Language: language(tscss.Language)},
+	{ID: "lua", Filetypes: []string{"lua"}, Queries: []string{"highlights.scm"}, Language: language(tslua.Language)},
+	{ID: "yaml", Filetypes: []string{"yaml"}, Queries: []string{"highlights.scm"}, Language: language(tsyaml.Language)},
+}
+
+func language(constructor func() unsafe.Pointer) func() *sitter.Language {
+	return func() *sitter.Language { return sitter.NewLanguage(constructor()) }
+}
+
+func definitionForFiletype(filetype string) (Definition, bool) {
+	for _, definition := range definitions {
+		for _, candidate := range definition.Filetypes {
+			if candidate == filetype {
+				return definition, true
+			}
+		}
+	}
+	return Definition{}, false
 }
 
 // captureGroups maps a tree-sitter capture name to a micro highlight group.
@@ -137,20 +185,6 @@ func MapCapture(name string) string {
 	return ""
 }
 
-// goKeywordGroups refines the grammar's single @keyword capture into the
-// vocabulary the old go.yaml used: declarations are preproc, control-flow
-// keywords are special, and the rest stay statement.
-var goKeywordGroups = map[string]string{
-	"package": "preproc", "import": "preproc", "const": "preproc", "var": "preproc",
-	"type": "preproc", "struct": "preproc", "func": "preproc", "interface": "preproc",
-	"map": "preproc", "chan": "preproc", "defer": "preproc",
-	"break": "special", "case": "special", "continue": "special", "default": "special",
-	"go": "special", "goto": "special", "range": "special", "return": "special",
-	"fallthrough": "special",
-	"else":        "statement", "for": "statement", "if": "statement",
-	"switch": "statement", "select": "statement",
-}
-
 type grammar struct {
 	id       string
 	parser   *sitter.Parser
@@ -192,7 +226,8 @@ type Engine struct {
 	tick        uint64
 }
 
-// New returns an engine that looks for <grammarDir>/<grammar>/highlights.scm.
+// New returns an engine that loads each grammar's query files from
+// <grammarDir>/<grammar>/<name>.
 func New(grammarDir string) *Engine {
 	return &Engine{
 		grammarDir:  grammarDir,
@@ -248,38 +283,38 @@ func (e *Engine) grammarFor(filetype string) (*grammar, error) {
 }
 
 func (e *Engine) loadGrammar(filetype string) (*grammar, error) {
-	grammarID, ok := filetypeGrammar[filetype]
+	definition, ok := definitionForFiletype(filetype)
 	if !ok {
 		return nil, fmt.Errorf("unsupported filetype %q: no linked tree-sitter grammar", filetype)
 	}
-	newLanguage, ok := grammarLanguages[grammarID]
-	if !ok {
-		return nil, fmt.Errorf("filetype %q maps to unknown grammar %q", filetype, grammarID)
-	}
-	language := newLanguage()
+	language := definition.Language()
 	if language == nil {
-		return nil, fmt.Errorf("grammar %q returned a nil language", grammarID)
+		return nil, fmt.Errorf("grammar %q returned a nil language", definition.ID)
 	}
-	queryPath, err := e.findQuery(grammarID)
-	if err != nil {
-		return nil, err
+	var sources []string
+	for _, name := range definition.Queries {
+		queryPath, err := e.findQuery(definition.ID, name)
+		if err != nil {
+			return nil, err
+		}
+		querySource, err := os.ReadFile(queryPath)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", queryPath, err)
+		}
+		sources = append(sources, string(querySource))
 	}
-	querySource, err := os.ReadFile(queryPath)
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", queryPath, err)
-	}
-	query, queryErr := sitter.NewQuery(language, string(querySource))
+	query, queryErr := sitter.NewQuery(language, strings.Join(sources, "\n"))
 	if queryErr != nil {
-		return nil, fmt.Errorf("%s: %s", queryPath, queryErr.Message)
+		return nil, fmt.Errorf("grammar %q query: %s", definition.ID, queryErr.Message)
 	}
 	parser := sitter.NewParser()
 	if err := parser.SetLanguage(language); err != nil {
 		query.Close()
 		parser.Close()
-		return nil, fmt.Errorf("set language %q: %w", grammarID, err)
+		return nil, fmt.Errorf("set language %q: %w", definition.ID, err)
 	}
 	return &grammar{
-		id:       grammarID,
+		id:       definition.ID,
 		parser:   parser,
 		language: language,
 		query:    query,
@@ -287,18 +322,20 @@ func (e *Engine) loadGrammar(filetype string) (*grammar, error) {
 	}, nil
 }
 
-func (e *Engine) findQuery(grammarID string) (string, error) {
-	candidates := []string{
-		filepath.Join(e.grammarDir, grammarID, "highlights.scm"),
-		filepath.Join(e.grammarDir, grammarID+".scm"),
-		filepath.Join(e.grammarDir, "highlights.scm"),
+func (e *Engine) findQuery(grammarID, name string) (string, error) {
+	candidates := []string{filepath.Join(e.grammarDir, grammarID, name)}
+	if name == "highlights.scm" {
+		candidates = append(candidates,
+			filepath.Join(e.grammarDir, grammarID+".scm"),
+			filepath.Join(e.grammarDir, "highlights.scm"),
+		)
 	}
 	for _, path := range candidates {
 		if info, err := os.Stat(path); err == nil && !info.IsDir() {
 			return path, nil
 		}
 	}
-	return "", fmt.Errorf("no highlights.scm for grammar %q under %q", grammarID, e.grammarDir)
+	return "", fmt.Errorf("no %s for grammar %q under %q", name, grammarID, e.grammarDir)
 }
 
 func (e *Engine) touchSession(id int64) *session {
@@ -456,11 +493,6 @@ func (g *grammar) spans(tree *sitter.Tree, text []byte) []Span {
 				continue
 			}
 			node := capture.Node
-			if g.id == "go" && name == "keyword" {
-				if refined, ok := goKeywordGroups[nodeText(text, &node)]; ok {
-					group = refined
-				}
-			}
 			start, end := node.StartPosition(), node.EndPosition()
 			spec := strings.Count(name, ".") + 1
 			for _, span := range splitNode(lines, int(start.Row), int(start.Column), int(end.Row), int(end.Column)) {
@@ -475,14 +507,6 @@ func (g *grammar) spans(tree *sitter.Tree, text []byte) []Span {
 		}
 	}
 	return resolve(raw)
-}
-
-func nodeText(text []byte, node *sitter.Node) string {
-	start, end := node.StartByte(), node.EndByte()
-	if start > end || end > uint(len(text)) {
-		return ""
-	}
-	return string(text[start:end])
 }
 
 func splitNode(lines lineIndex, startRow, startColumn, endRow, endColumn int) []Span {

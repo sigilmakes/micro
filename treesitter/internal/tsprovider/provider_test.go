@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"math/rand"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -38,6 +39,136 @@ func haveSpan(spans []Span, line, start, end int, group string) bool {
 	return false
 }
 
+func lineSpans(spans []Span, line int) []Span {
+	var out []Span
+	for _, span := range spans {
+		if span.Line == line {
+			out = append(out, span)
+		}
+	}
+	return out
+}
+
+// positionOf returns the 0-based line and byte column of the first occurrence
+// of needle in text.
+func positionOf(t *testing.T, text, needle string) (int, int) {
+	t.Helper()
+	at := strings.Index(text, needle)
+	if at < 0 {
+		t.Fatalf("%q missing from sample %q", needle, text)
+	}
+	line := strings.Count(text[:at], "\n")
+	lineStart := strings.LastIndexByte(text[:at], '\n') + 1
+	return line, at - lineStart
+}
+
+func TestDefinitionRegistry(t *testing.T) {
+	want := map[string]string{
+		"go":         "go",
+		"python":     "python",
+		"javascript": "javascript",
+		"typescript": "tsx",
+		"rust":       "rust",
+		"c":          "c",
+		"c++":        "cpp",
+		"shell":      "bash",
+		"json":       "json",
+		"toml":       "toml",
+		"html":       "html",
+		"css":        "css",
+		"lua":        "lua",
+		"yaml":       "yaml",
+	}
+	for filetype, id := range want {
+		definition, ok := definitionForFiletype(filetype)
+		if !ok {
+			t.Errorf("filetype %q is not in the grammar registry", filetype)
+			continue
+		}
+		if definition.ID != id {
+			t.Errorf("filetype %q: grammar id %q, want %q", filetype, definition.ID, id)
+		}
+	}
+	if _, ok := definitionForFiletype("ruby"); ok {
+		t.Error("ruby unexpectedly mapped to a linked grammar")
+	}
+	if got := len(definitionForFiletypeForTest(t, "typescript").Queries); got != 2 {
+		t.Errorf("typescript query layers: got %d, want 2", got)
+	}
+	if got := len(definitionForFiletypeForTest(t, "c++").Queries); got != 2 {
+		t.Errorf("c++ query layers: got %d, want 2", got)
+	}
+}
+
+func definitionForFiletypeForTest(t *testing.T, filetype string) Definition {
+	t.Helper()
+	definition, ok := definitionForFiletype(filetype)
+	if !ok {
+		t.Fatalf("filetype %q is not in the grammar registry", filetype)
+	}
+	return definition
+}
+
+// TestLanguageSpans checks that every linked grammar parses a small snippet
+// and emits the expected micro groups. Each case also exercises the query
+// layers: TypeScript over JavaScript and C++ over C.
+func TestLanguageSpans(t *testing.T) {
+	type want struct {
+		text  string
+		group string
+	}
+	cases := []struct {
+		filetype string
+		text     string
+		wants    []want
+	}{
+		{"go", "package main\n\nfunc main() { s := \"alpha\" }\n", []want{{"alpha", "constant.string"}, {"func", "statement"}}},
+		{"python", "def greet(name):\n    return \"alpha\"  # note\n", []want{{"alpha", "constant.string"}, {"note", "comment"}, {"def", "statement"}}},
+		{"javascript", "const n = 42; // note\n", []want{{"42", "constant.number"}, {"note", "comment"}}},
+		{"typescript", "interface User {\n  id: number;\n}\n\n// note\nconst user: User = { id: 1 };\n", []want{{"interface", "statement"}, {"note", "comment"}}},
+		{"rust", "fn main() {\n    let s = \"alpha\"; // note\n}\n", []want{{"alpha", "constant.string"}, {"note", "comment"}}},
+		{"c", "int main(void) { return 42; } // note\n", []want{{"42", "constant.number"}, {"note", "comment"}}},
+		{"c++", "const char *s = \"alpha\"; // note\n", []want{{"alpha", "constant.string"}, {"note", "comment"}}},
+		{"shell", "echo \"alpha\" # note\n", []want{{"alpha", "constant.string"}, {"note", "comment"}}},
+		{"json", "{\"key\": 42, \"flag\": true}\n", []want{{"key", "constant.string"}, {"true", "constant.bool"}}},
+		{"toml", "[server]\nport = 8080 # note\nname = \"alpha\"\n", []want{{"note", "comment"}, {"alpha", "constant.string"}}},
+		{"html", "<div class=\"alpha\">hi</div>\n", []want{{"div", "symbol.tag"}, {"alpha", "constant.string"}}},
+		{"css", "body { color: red; } /* note */\n", []want{{"body", "symbol.tag"}, {"note", "comment"}}},
+		{"lua", "local s = \"alpha\" -- note\n", []want{{"alpha", "constant.string"}, {"note", "comment"}}},
+		{"yaml", "name: alpha\nenabled: true\n", []want{{"alpha", "constant.string"}, {"true", "constant.bool"}}},
+	}
+
+	engine := New("../../queries")
+	defer engine.Close()
+	for _, tc := range cases {
+		t.Run(tc.filetype, func(t *testing.T) {
+			spans, err := engine.Spans(int64(len(tc.filetype)), tc.filetype, []byte(tc.text))
+			if err != nil {
+				t.Fatalf("%s: %v", tc.filetype, err)
+			}
+			if len(spans) == 0 {
+				t.Fatalf("%s: no spans", tc.filetype)
+			}
+			for _, want := range tc.wants {
+				line, column := positionOf(t, tc.text, want.text)
+				if got := groupAt(spans, line, column); got != want.group {
+					t.Errorf("%s: group at %q = %q, want %q; line spans %v",
+						tc.filetype, want.text, got, want.group, lineSpans(spans, line))
+				}
+			}
+			lines := splitLines([]byte(tc.text))
+			for _, span := range spans {
+				if span.Line < 0 || span.Line >= len(lines) {
+					t.Fatalf("%s: span line out of range: %+v", tc.filetype, span)
+				}
+				if span.Start < 0 || span.End > len(lines[span.Line]) || span.End <= span.Start {
+					t.Fatalf("%s: span out of bounds: %+v (line length %d)", tc.filetype, span, len(lines[span.Line]))
+				}
+			}
+		})
+	}
+}
+
 func TestGoSampleSpans(t *testing.T) {
 	engine := New("../../queries")
 	defer engine.Close()
@@ -48,15 +179,15 @@ func TestGoSampleSpans(t *testing.T) {
 	}
 	lines := splitLines(text)
 
-	// Go keyword refinement: declarations are preproc, control flow is
-	// special, and conditional keywords stay statement.
-	if got := groupAt(spans, 0, 0); got != "preproc" {
+	// The upstream Go query emits one @keyword capture for every keyword, so
+	// all of them map to the generic statement group.
+	if got := groupAt(spans, 0, 0); got != "statement" {
 		t.Errorf("package keyword: got %q", got)
 	}
-	if got := groupAt(spans, 11, 0); got != "preproc" {
+	if got := groupAt(spans, 11, 0); got != "statement" {
 		t.Errorf("func keyword: got %q", got)
 	}
-	if got := groupAt(spans, 16, 1); got != "special" {
+	if got := groupAt(spans, 16, 1); got != "statement" {
 		t.Errorf("return keyword: got %q", got)
 	}
 
@@ -123,59 +254,57 @@ func TestGoSampleSpans(t *testing.T) {
 	}
 }
 
-func lineSpans(spans []Span, line int) []Span {
-	var out []Span
-	for _, span := range spans {
-		if span.Line == line {
-			out = append(out, span)
-		}
-	}
-	return out
-}
-
 func TestIncrementalMatchesFullParse(t *testing.T) {
-	engine := New("../../queries")
-	defer engine.Close()
-	text := append([]byte(nil), loadSample(t)...)
-
-	insertions := []string{
-		"x", "\n", "// note\n", "func f() {}\n", "é", "`", "/*", "\tvar _ = 1\n",
-		"日本語", "\r\n", "string", "}", "package p\n",
+	bases := map[string]string{
+		"go":     string(loadSample(t)),
+		"python": "def f(x):\n    return [x, \"a\"]\n\nclass C:\n    pass\n",
 	}
-	random := rand.New(rand.NewSource(7))
-	for step := 0; step < 40; step++ {
-		switch random.Intn(3) {
-		case 0:
-			at := random.Intn(len(text) + 1)
-			insert := insertions[random.Intn(len(insertions))]
-			text = append(text[:at:at], append([]byte(insert), text[at:]...)...)
-		case 1:
-			if len(text) > 1 {
-				at := random.Intn(len(text))
-				n := 1 + random.Intn(min(5, len(text)-at))
-				text = append(text[:at:at], text[at+n:]...)
-			}
-		default:
-			if len(text) > 1 {
-				at := random.Intn(len(text))
-				n := 1 + random.Intn(min(5, len(text)-at))
-				text = append(text[:at:at], append([]byte(insertions[random.Intn(len(insertions))]), text[at+n:]...)...)
-			}
-		}
+	insertions := []string{
+		"x", "\n", "# note\n", "\"", "é", "`", "/*", "\t", "  ",
+		"日本語", "\r\n", ")", "}", "  pass\n", "alpha",
+	}
+	for filetype, base := range bases {
+		t.Run(filetype, func(t *testing.T) {
+			engine := New("../../queries")
+			defer engine.Close()
+			text := append([]byte(nil), base...)
 
-		got, err := engine.Spans(1, "go", text)
-		if err != nil {
-			t.Fatalf("step %d: incremental parse: %v", step, err)
-		}
-		fresh := New("../../queries")
-		want, err := fresh.Spans(1, "go", text)
-		fresh.Close()
-		if err != nil {
-			t.Fatalf("step %d: full parse: %v", step, err)
-		}
-		if !equalSpans(got, want) {
-			t.Fatalf("step %d: incremental spans differ from full parse\ngot  %v\nwant %v\ntext:\n%s", step, got, want, text)
-		}
+			random := rand.New(rand.NewSource(7))
+			for step := 0; step < 25; step++ {
+				switch random.Intn(3) {
+				case 0:
+					at := random.Intn(len(text) + 1)
+					insert := insertions[random.Intn(len(insertions))]
+					text = append(text[:at:at], append([]byte(insert), text[at:]...)...)
+				case 1:
+					if len(text) > 1 {
+						at := random.Intn(len(text))
+						n := 1 + random.Intn(min(5, len(text)-at))
+						text = append(text[:at:at], text[at+n:]...)
+					}
+				default:
+					if len(text) > 1 {
+						at := random.Intn(len(text))
+						n := 1 + random.Intn(min(5, len(text)-at))
+						text = append(text[:at:at], append([]byte(insertions[random.Intn(len(insertions))]), text[at+n:]...)...)
+					}
+				}
+
+				got, err := engine.Spans(1, filetype, text)
+				if err != nil {
+					t.Fatalf("step %d: incremental parse: %v", step, err)
+				}
+				fresh := New("../../queries")
+				want, err := fresh.Spans(1, filetype, text)
+				fresh.Close()
+				if err != nil {
+					t.Fatalf("step %d: full parse: %v", step, err)
+				}
+				if !equalSpans(got, want) {
+					t.Fatalf("step %d: incremental spans differ from full parse\ngot  %v\nwant %v\ntext:\n%s", step, got, want, text)
+				}
+			}
+		})
 	}
 }
 
@@ -271,7 +400,7 @@ func TestSessionsAreBounded(t *testing.T) {
 func TestUnsupportedFiletype(t *testing.T) {
 	engine := New("../../queries")
 	defer engine.Close()
-	if _, err := engine.Spans(1, "python", []byte("print(1)\n")); err == nil {
+	if _, err := engine.Spans(1, "ruby", []byte("puts 1\n")); err == nil {
 		t.Fatal("expected an error for an unlinked filetype")
 	}
 }

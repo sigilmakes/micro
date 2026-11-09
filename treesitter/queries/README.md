@@ -21,6 +21,7 @@ queries only cover dialect-specific patterns.
 | `css/` | [tree-sitter-css](https://github.com/tree-sitter/tree-sitter-css) | `v0.25.0` | MIT | |
 | `lua/` | [tree-sitter-lua](https://github.com/tree-sitter-grammars/tree-sitter-lua) | `v0.5.0` | MIT | Upstream license file is `LICENSE.md`; copied as `LICENSE`. |
 | `yaml/` | [tree-sitter-yaml](https://github.com/tree-sitter-grammars/tree-sitter-yaml) | `v0.7.2` | MIT | |
+| `nix/` | [tree-sitter-nix](https://github.com/nix-community/tree-sitter-nix) | `v0.3.0` | MIT | No Go bindings; the parser C source is vendored under `../third_party/tree-sitter-nix`. |
 
 The query files are unmodified. Update a directory and its module version
 together; the Go module pins live in `../go.mod`.

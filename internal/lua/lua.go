@@ -27,6 +27,10 @@ import (
 
 var L *lua.LState
 
+// Loading names the plugin whose code is currently being loaded or called.
+// The syntax bridge uses it to namespace providers.
+var Loading string
+
 // LoadFile loads a lua file
 func LoadFile(module string, file string, data []byte) error {
 	pluginDef := []byte("module(\"" + module + "\", package.seeall)")

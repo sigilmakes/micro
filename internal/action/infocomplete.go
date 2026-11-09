@@ -8,7 +8,8 @@ import (
 	"github.com/micro-editor/micro/v2/internal/buffer"
 	"github.com/micro-editor/micro/v2/internal/config"
 	"github.com/micro-editor/micro/v2/internal/util"
-	"github.com/micro-editor/micro/v2/pkg/highlight"
+	"github.com/micro-editor/micro/v2/pkg/filetype"
+	"github.com/micro-editor/micro/v2/pkg/syntax"
 )
 
 // This file is meant (for now) for autocompletion in command mode, not
@@ -80,52 +81,27 @@ func colorschemeComplete(input string) (string, []string) {
 
 // filetypeComplete autocompletes filetype
 func filetypeComplete(input string) (string, []string) {
+	seen := make(map[string]bool)
 	var suggestions []string
-
-	// We cannot match filetypes just by names of syntax files,
-	// since those names may be different from the actual filetype values
-	// specified inside syntax files (e.g. "c++" filetype in cpp.yaml).
-	// So we need to parse filetype values out of those files.
-	for _, f := range config.ListRealRuntimeFiles(config.RTSyntax) {
-		data, err := f.Data()
-		if err != nil {
-			continue
+	add := func(ft string) {
+		if ft == "" || ft == "unknown" || seen[ft] {
+			return
 		}
-		header, err := highlight.MakeHeaderYaml(data)
-		if err != nil {
-			continue
-		}
-		// Prevent duplicated defaults
-		if header.FileType == "off" || header.FileType == "unknown" {
-			continue
-		}
-		if strings.HasPrefix(header.FileType, input) {
-			suggestions = append(suggestions, header.FileType)
+		seen[ft] = true
+		if strings.HasPrefix(ft, input) {
+			suggestions = append(suggestions, ft)
 		}
 	}
-headerLoop:
-	for _, f := range config.ListRuntimeFiles(config.RTSyntaxHeader) {
-		data, err := f.Data()
-		if err != nil {
-			continue
-		}
-		header, err := highlight.MakeHeader(data)
-		if err != nil {
-			continue
-		}
-		for _, v := range suggestions {
-			if v == header.FileType {
-				continue headerLoop
-			}
-		}
-		if strings.HasPrefix(header.FileType, input) {
-			suggestions = append(suggestions, header.FileType)
-		}
+	for _, ft := range filetype.Filetypes() {
+		add(ft)
 	}
-
+	for _, ft := range syntax.FileTypes() {
+		add(ft)
+	}
 	if strings.HasPrefix("off", input) {
 		suggestions = append(suggestions, "off")
 	}
+	sort.Strings(suggestions)
 
 	var chosen string
 	if len(suggestions) == 1 {

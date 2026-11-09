@@ -422,6 +422,9 @@ func main() {
 	action.InitCommands()
 
 	timerChan = make(chan func())
+	buffer.MainThread = func(f func()) {
+		timerChan <- f
+	}
 
 	err = config.RunPluginFn("preinit")
 	if err != nil {
@@ -450,6 +453,9 @@ func main() {
 	if err != nil {
 		screen.TermMessage(err)
 	}
+
+	// Providers registered in plugin init() attach to buffers opened before it.
+	buffer.RefreshSyntax()
 
 	err = config.InitColorscheme()
 	if err != nil {

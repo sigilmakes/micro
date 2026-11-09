@@ -8,24 +8,23 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/micro-editor/micro/v2/pkg/syntax"
 	rt "github.com/micro-editor/micro/v2/runtime"
 )
 
 const (
-	RTColorscheme  = 0
-	RTSyntax       = 1
-	RTHelp         = 2
-	RTPlugin       = 3
-	RTSyntaxHeader = 4
+	RTColorscheme = 0
+	RTHelp        = 2
+	RTPlugin      = 3
 )
 
-var (
-	NumTypes = 5 // How many filetypes are there
-)
+// NumTypes preserves the numeric slots used before the syntax engine was
+// removed. Slots 1 (RTSyntax) and 4 (RTSyntaxHeader) are intentionally unused.
+var NumTypes = 5
 
 type RTFiletype int
 
-// RuntimeFile allows the program to read runtime data like colorschemes or syntax files
+// RuntimeFile allows the program to read runtime data like colorschemes or help files
 type RuntimeFile interface {
 	// Name returns a name of the file without paths or extensions
 	Name() string
@@ -172,13 +171,12 @@ func InitRuntimeFiles(user bool) {
 	initRuntimeVars()
 
 	add(RTColorscheme, "colorschemes", "*.micro")
-	add(RTSyntax, "syntax", "*.yaml")
-	add(RTSyntaxHeader, "syntax", "*.hdr")
 	add(RTHelp, "help", "*.md")
 }
 
 // InitPlugins initializes the plugins
 func InitPlugins() {
+	syntax.Clear()
 	Plugins = Plugins[:0]
 	initlua := filepath.Join(ConfigDir, "init.lua")
 

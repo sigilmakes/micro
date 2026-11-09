@@ -90,6 +90,9 @@ func (p *Plugin) Load() error {
 	if v, ok := GlobalSettings[p.Name]; ok && !v.(bool) {
 		return nil
 	}
+	prev := ulua.Loading
+	ulua.Loading = p.Name
+	defer func() { ulua.Loading = prev }()
 	for _, f := range p.Srcs {
 		dat, err := f.Data()
 		if err != nil {
@@ -107,6 +110,10 @@ func (p *Plugin) Load() error {
 
 // Call calls a given function in this plugin
 func (p *Plugin) Call(fn string, args ...lua.LValue) (lua.LValue, error) {
+	prev := ulua.Loading
+	ulua.Loading = p.Name
+	defer func() { ulua.Loading = prev }()
+
 	plug := ulua.L.GetGlobal(p.Name)
 	if plug == lua.LNil {
 		log.Println("Plugin does not exist:", p.Name, "at", p.DirName, ":", p)

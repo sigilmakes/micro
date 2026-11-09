@@ -35,6 +35,8 @@ func LuaImport(pkg string) *lua.LTable {
 		return luaImportMicroConfig()
 	case "micro/util":
 		return luaImportMicroUtil()
+	case "micro/syntax":
+		return luaImportMicroSyntax()
 	default:
 		return ulua.Import(pkg)
 	}
@@ -82,7 +84,6 @@ func luaImportMicroConfig() *lua.LTable {
 	ulua.L.SetField(pkg, "ReadRuntimeFile", luar.New(ulua.L, config.PluginReadRuntimeFile))
 	ulua.L.SetField(pkg, "NewRTFiletype", luar.New(ulua.L, config.NewRTFiletype))
 	ulua.L.SetField(pkg, "RTColorscheme", luar.New(ulua.L, config.RTColorscheme))
-	ulua.L.SetField(pkg, "RTSyntax", luar.New(ulua.L, config.RTSyntax))
 	ulua.L.SetField(pkg, "RTHelp", luar.New(ulua.L, config.RTHelp))
 	ulua.L.SetField(pkg, "RTPlugin", luar.New(ulua.L, config.RTPlugin))
 	ulua.L.SetField(pkg, "RegisterCommonOption", luar.New(ulua.L, config.RegisterCommonOptionPlug))

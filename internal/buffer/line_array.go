@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	"github.com/micro-editor/micro/v2/internal/util"
-	"github.com/micro-editor/micro/v2/pkg/highlight"
+	"github.com/micro-editor/micro/v2/pkg/syntax"
 )
 
 // Finds the byte index of the nth rune in a byte slice
@@ -41,13 +41,11 @@ type searchState struct {
 	done       bool
 }
 
-// A Line contains the data in bytes as well as a highlight state, match
-// and a flag for whether the highlighting needs to be updated
+// A Line contains the data in bytes and the display-facing highlight match.
 type Line struct {
 	data []byte
 
-	state highlight.State
-	match highlight.LineMatch
+	match syntax.LineMatch
 	lock  sync.Mutex
 
 	// The search states for the line, used for highlighting of search matches,
@@ -148,7 +146,6 @@ func NewLineArray(size uint64, endings FileFormat, reader io.Reader) *LineArray 
 			if err == io.EOF {
 				la.lines = Append(la.lines, Line{
 					data:  data,
-					state: nil,
 					match: nil,
 				})
 			}
@@ -157,7 +154,6 @@ func NewLineArray(size uint64, endings FileFormat, reader io.Reader) *LineArray 
 		} else {
 			la.lines = Append(la.lines, Line{
 				data:  data[:dlen-1],
-				state: nil,
 				match: nil,
 			})
 		}
@@ -189,13 +185,11 @@ func (la *LineArray) Bytes() []byte {
 func (la *LineArray) newlineBelow(y int) {
 	la.lines = append(la.lines, Line{
 		data:  []byte{' '},
-		state: nil,
 		match: nil,
 	})
 	copy(la.lines[y+2:], la.lines[y+1:])
 	la.lines[y+1] = Line{
 		data:  []byte{},
-		state: la.lines[y].state,
 		match: nil,
 	}
 }
@@ -240,8 +234,6 @@ func (la *LineArray) joinLines(a, b int) {
 func (la *LineArray) split(pos Loc) {
 	la.newlineBelow(pos.Y)
 	la.lines[pos.Y+1].data = append(la.lines[pos.Y+1].data, la.lines[pos.Y].data[pos.X:]...)
-	la.lines[pos.Y+1].state = la.lines[pos.Y].state
-	la.lines[pos.Y].state = nil
 	la.lines[pos.Y].match = nil
 	la.lines[pos.Y+1].match = nil
 	la.deleteToEnd(Loc{pos.X, pos.Y})
@@ -330,29 +322,15 @@ func (la *LineArray) LineBytes(lineN int) []byte {
 	return la.lines[lineN].data
 }
 
-// State gets the highlight state for the given line number
-func (la *LineArray) State(lineN int) highlight.State {
-	la.lines[lineN].lock.Lock()
-	defer la.lines[lineN].lock.Unlock()
-	return la.lines[lineN].state
-}
-
-// SetState sets the highlight state at the given line number
-func (la *LineArray) SetState(lineN int, s highlight.State) {
-	la.lines[lineN].lock.Lock()
-	defer la.lines[lineN].lock.Unlock()
-	la.lines[lineN].state = s
-}
-
 // SetMatch sets the match at the given line number
-func (la *LineArray) SetMatch(lineN int, m highlight.LineMatch) {
+func (la *LineArray) SetMatch(lineN int, m syntax.LineMatch) {
 	la.lines[lineN].lock.Lock()
 	defer la.lines[lineN].lock.Unlock()
 	la.lines[lineN].match = m
 }
 
 // Match retrieves the match for the given line number
-func (la *LineArray) Match(lineN int) highlight.LineMatch {
+func (la *LineArray) Match(lineN int) syntax.LineMatch {
 	la.lines[lineN].lock.Lock()
 	defer la.lines[lineN].lock.Unlock()
 	return la.lines[lineN].match

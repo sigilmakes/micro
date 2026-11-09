@@ -330,7 +330,7 @@ func (h *BufPane) ToggleLogCmd(args []string) {
 	}
 }
 
-// ReloadCmd reloads all files (syntax files, colorschemes, plugins...)
+// ReloadCmd reloads all files (colorschemes, plugins, settings...)
 func (h *BufPane) ReloadCmd(args []string) {
 	reloadRuntime(true)
 }
@@ -582,11 +582,8 @@ func doSetGlobalOptionNative(option string, nativeValue any) error {
 	delete(config.VolatileSettings, option)
 
 	if option == "colorscheme" {
-		// LoadSyntaxFiles()
 		config.InitColorscheme()
-		for _, b := range buffer.OpenBuffers {
-			b.UpdateRules()
-		}
+		screen.Redraw()
 	} else if option == "infobar" || option == "keymenu" || option == "tabalways" {
 		Tabs.Resize()
 	} else if option == "mouse" {

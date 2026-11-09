@@ -93,11 +93,7 @@ func (b *Buffer) DoSetOptionNative(option string, nativeValue any) {
 		}
 		b.setModified()
 	} else if option == "syntax" {
-		if !nativeValue.(bool) {
-			b.ClearMatches()
-		} else {
-			b.UpdateRules()
-		}
+		b.UpdateProvider()
 	} else if option == "encoding" {
 		enc, err := htmlindex.Get(b.Settings["encoding"].(string))
 		if err != nil {

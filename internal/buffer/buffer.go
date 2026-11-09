@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	luar "layeh.com/gopher-luar"
@@ -21,7 +23,8 @@ import (
 	ulua "github.com/micro-editor/micro/v2/internal/lua"
 	"github.com/micro-editor/micro/v2/internal/screen"
 	"github.com/micro-editor/micro/v2/internal/util"
-	"github.com/micro-editor/micro/v2/pkg/highlight"
+	"github.com/micro-editor/micro/v2/pkg/filetype"
+	"github.com/micro-editor/micro/v2/pkg/syntax"
 	dmp "github.com/sergi/go-diff/diffmatchpatch"
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/htmlindex"
@@ -31,7 +34,8 @@ import (
 
 var (
 	// OpenBuffers is a list of the currently open buffers
-	OpenBuffers []*Buffer
+	OpenBuffers  []*Buffer
+	nextBufferID uint64
 	// LogBuf is a reference to the log buffer which can be opened with the
 	// `> log` command
 	LogBuf *Buffer
@@ -111,11 +115,9 @@ type SharedBuffer struct {
 	// it changes based on how the buffer has changed
 	HasSuggestions bool
 
-	// The Highlighter struct actually performs the highlighting
-	Highlighter *highlight.Highlighter
-	// SyntaxDef represents the syntax highlighting definition being used
-	// This stores the highlighting rules and filetype detection info
-	SyntaxDef *highlight.Def
+	hl    *highlightSession
+	hlGen uint64
+	hlID  uint64
 
 	ModifiedThisFrame bool
 
@@ -129,6 +131,14 @@ func (b *SharedBuffer) insert(pos Loc, value []byte) {
 	b.setModified()
 
 	inslines := bytes.Count(value, []byte{'\n'})
+	b.recordEdit(syntax.Edit{
+		StartLine:  pos.Y,
+		StartCol:   pos.X,
+		OldEndLine: pos.Y,
+		OldEndCol:  pos.X,
+		NewEndLine: pos.Y + inslines,
+		NewEndCol:  insertedEndCol(pos, value, inslines),
+	})
 	b.MarkModified(pos.Y, pos.Y+inslines)
 }
 
@@ -136,7 +146,23 @@ func (b *SharedBuffer) remove(start, end Loc) []byte {
 	b.HasSuggestions = false
 	defer b.setModified()
 	defer b.MarkModified(start.Y, end.Y)
+	b.recordEdit(syntax.Edit{
+		StartLine:  start.Y,
+		StartCol:   start.X,
+		OldEndLine: end.Y,
+		OldEndCol:  end.X,
+		NewEndLine: start.Y,
+		NewEndCol:  start.X,
+	})
 	return b.LineArray.remove(start, end)
+}
+
+func insertedEndCol(pos Loc, value []byte, newlines int) int {
+	if newlines == 0 {
+		return pos.X + syntax.CharacterCount(value)
+	}
+	last := bytes.LastIndexByte(value, '\n')
+	return syntax.CharacterCount(value[last+1:])
 }
 
 func (b *SharedBuffer) setModified() {
@@ -180,20 +206,18 @@ func (b *SharedBuffer) calcHash(out *[md5.Size]byte) {
 	h.Sum((*out)[:0])
 }
 
-// MarkModified marks the buffer as modified for this frame
-// and performs rehighlighting if syntax highlighting is enabled
+// MarkModified marks the buffer as modified for this frame and asks the
+// active highlighting provider for fresh spans after a short debounce.
 func (b *SharedBuffer) MarkModified(start, end int) {
 	b.ModifiedThisFrame = true
 
 	start = util.Clamp(start, 0, len(b.lines)-1)
 	end = util.Clamp(end, 0, len(b.lines)-1)
 
-	if b.Settings["syntax"].(bool) && b.SyntaxDef != nil {
-		l := -1
-		for i := start; i <= end; i++ {
-			l = util.Max(b.Highlighter.ReHighlightStates(b, i), l)
-		}
-		b.Highlighter.HighlightMatches(b, start, l)
+	if b.hl != nil {
+		b.hlGen++
+		b.hl.cause = syntax.CauseEdit
+		b.scheduleHighlight()
 	}
 
 	for i := start; i <= end; i++ {
@@ -376,6 +400,7 @@ func NewBuffer(r io.Reader, size int64, path string, btype BufType, cmd Command)
 	hasBackup := false
 	if !found {
 		b.SharedBuffer = new(SharedBuffer)
+		b.hlID = atomic.AddUint64(&nextBufferID, 1)
 		b.Type = btype
 
 		b.AbsPath = absPath
@@ -533,6 +558,7 @@ func (b *Buffer) Fini() {
 			b.Serialize()
 		}
 		b.CancelBackup()
+		b.SharedBuffer.closeHighlight()
 	}
 
 	if b.Type == BTStdout {
@@ -721,307 +747,301 @@ func (b *Buffer) Size() int {
 	return nb
 }
 
-func parseDefFromFile(f config.RuntimeFile, header *highlight.Header) *highlight.Def {
-	data, err := f.Data()
-	if err != nil {
-		screen.TermMessage("Error loading syntax file " + f.Name() + ": " + err.Error())
-		return nil
-	}
+// HighlightDebounce is how long edits settle before a provider request.
+// It is a variable so tests can shorten it.
+var HighlightDebounce = 25 * time.Millisecond
 
-	if header == nil {
-		header, err = highlight.MakeHeaderYaml(data)
-		if err != nil {
-			screen.TermMessage("Error parsing header for syntax file " + f.Name() + ": " + err.Error())
-			return nil
-		}
-	}
+// MainThread schedules f on the editor's main goroutine. cmd/micro replaces
+// this with a send to its timer channel so Lua providers never run on a
+// timer goroutine.
+var MainThread = func(f func()) { f() }
 
-	file, err := highlight.ParseFile(data)
-	if err != nil {
-		screen.TermMessage("Error parsing syntax file " + f.Name() + ": " + err.Error())
-		return nil
-	}
-
-	syndef, err := highlight.ParseDef(file, header)
-	if err != nil {
-		screen.TermMessage("Error parsing syntax file " + f.Name() + ": " + err.Error())
-		return nil
-	}
-
-	return syndef
+type highlightSession struct {
+	provider   *syntax.Provider
+	filetype   string
+	requestGen uint64
+	inFlight   bool
+	dirty      bool
+	closed     bool
+	cause      syntax.Cause
+	timer      *time.Timer
+	edits      []syntax.Edit
 }
 
-// findRealRuntimeSyntaxDef finds a specific syntax definition
-// in the user's custom syntax files
-func findRealRuntimeSyntaxDef(name string, header *highlight.Header) *highlight.Def {
-	for _, f := range config.ListRealRuntimeFiles(config.RTSyntax) {
-		if f.Name() == name {
-			syndef := parseDefFromFile(f, header)
-			if syndef != nil {
-				return syndef
-			}
+func (b *SharedBuffer) recordEdit(e syntax.Edit) {
+	if b.hl != nil && !b.hl.closed {
+		b.hl.edits = append(b.hl.edits, e)
+	}
+}
+
+func (b *SharedBuffer) highlightView() *Buffer {
+	for _, buf := range OpenBuffers {
+		if buf.SharedBuffer == b {
+			return buf
 		}
 	}
 	return nil
 }
 
-// findRuntimeSyntaxDef finds a specific syntax definition
-// in the built-in syntax files
-func findRuntimeSyntaxDef(name string, header *highlight.Header) *highlight.Def {
-	for _, f := range config.ListRuntimeFiles(config.RTSyntax) {
-		if f.Name() == name {
-			syndef := parseDefFromFile(f, header)
-			if syndef != nil {
-				return syndef
-			}
+// Text returns the whole buffer as UTF-8 lines joined with a single newline.
+func (b *SharedBuffer) Text() string {
+	var sb strings.Builder
+	for i := 0; i < b.LinesNum(); i++ {
+		if i > 0 {
+			sb.WriteByte('\n')
 		}
+		sb.Write(b.LineBytes(i))
 	}
-	return nil
+	return sb.String()
 }
 
-func resolveIncludes(syndef *highlight.Def) {
-	includes := highlight.GetIncludes(syndef)
-	if len(includes) == 0 {
-		return
-	}
-
-	var files []*highlight.File
-	for _, f := range config.ListRuntimeFiles(config.RTSyntax) {
-		data, err := f.Data()
-		if err != nil {
-			screen.TermMessage("Error loading syntax file " + f.Name() + ": " + err.Error())
-			continue
-		}
-
-		header, err := highlight.MakeHeaderYaml(data)
-		if err != nil {
-			screen.TermMessage("Error parsing syntax file " + f.Name() + ": " + err.Error())
-			continue
-		}
-
-		for _, i := range includes {
-			if header.FileType == i {
-				file, err := highlight.ParseFile(data)
-				if err != nil {
-					screen.TermMessage("Error parsing syntax file " + f.Name() + ": " + err.Error())
-					continue
-				}
-				files = append(files, file)
-				break
-			}
-		}
-		if len(files) >= len(includes) {
-			break
-		}
-	}
-
-	highlight.ResolveIncludes(syndef, files)
-}
-
-// UpdateRules updates the syntax rules and filetype for this buffer
-// This is called when the colorscheme changes
+// UpdateRules is kept as an alias for plugins that call buf:UpdateRules().
 func (b *Buffer) UpdateRules() {
-	if !b.Type.Syntax {
+	b.UpdateProvider()
+}
+
+// UpdateProvider re-detects the filetype and (re)attaches a highlighting
+// provider. No provider is a supported state: filetype identity still works.
+func (b *Buffer) UpdateProvider() {
+	if b.SharedBuffer == nil {
 		return
 	}
+	b.SharedBuffer.updateProvider()
+}
+
+func (b *SharedBuffer) updateProvider() {
+	if !b.Type.Syntax {
+		b.detachHighlight(true)
+		return
+	}
+
 	ft := b.Settings["filetype"].(string)
 	if ft == "off" {
-		b.ClearMatches()
-		b.SyntaxDef = nil
+		b.detachHighlight(true)
 		return
 	}
 
-	b.SyntaxDef = nil
-
-	// syntaxFileInfo is an internal helper structure
-	// to store properties of one single syntax file
-	type syntaxFileInfo struct {
-		header    *highlight.Header
-		fileName  string
-		syntaxDef *highlight.Def
-	}
-
-	fnameMatches := []syntaxFileInfo{}
-	headerMatches := []syntaxFileInfo{}
-	syntaxFile := ""
-	foundDef := false
-	var header *highlight.Header
-	// search for the syntax file in the user's custom syntax files
-	for _, f := range config.ListRealRuntimeFiles(config.RTSyntax) {
-		if f.Name() == "default" {
-			continue
-		}
-
-		data, err := f.Data()
-		if err != nil {
-			screen.TermMessage("Error loading syntax file " + f.Name() + ": " + err.Error())
-			continue
-		}
-
-		header, err = highlight.MakeHeaderYaml(data)
-		if err != nil {
-			screen.TermMessage("Error parsing header for syntax file " + f.Name() + ": " + err.Error())
-			continue
-		}
-
-		matchedFileType := false
-		matchedFileName := false
-		matchedFileHeader := false
-
-		if ft == "unknown" || ft == "" {
-			if header.MatchFileName(b.Path) {
-				matchedFileName = true
-			}
-			if len(fnameMatches) == 0 && header.MatchFileHeader(b.lines[0].data) {
-				matchedFileHeader = true
-			}
-		} else if header.FileType == ft {
-			matchedFileType = true
-		}
-
-		if matchedFileType || matchedFileName || matchedFileHeader {
-			file, err := highlight.ParseFile(data)
-			if err != nil {
-				screen.TermMessage("Error parsing syntax file " + f.Name() + ": " + err.Error())
-				continue
-			}
-
-			syndef, err := highlight.ParseDef(file, header)
-			if err != nil {
-				screen.TermMessage("Error parsing syntax file " + f.Name() + ": " + err.Error())
-				continue
-			}
-
-			if matchedFileType {
-				b.SyntaxDef = syndef
-				syntaxFile = f.Name()
-				foundDef = true
-				break
-			}
-
-			if matchedFileName {
-				fnameMatches = append(fnameMatches, syntaxFileInfo{header, f.Name(), syndef})
-			} else if matchedFileHeader {
-				headerMatches = append(headerMatches, syntaxFileInfo{header, f.Name(), syndef})
-			}
+	detectLimit := util.IntOpt(b.Settings["detectlimit"])
+	if ft == "" || ft == "unknown" {
+		if detected := filetype.Match(b.Path, b, detectLimit); detected != "" {
+			ft = detected
 		}
 	}
 
-	if !foundDef {
-		// search for the syntax file in the built-in syntax files
-		for _, f := range config.ListRuntimeFiles(config.RTSyntaxHeader) {
-			data, err := f.Data()
-			if err != nil {
-				screen.TermMessage("Error loading syntax header file " + f.Name() + ": " + err.Error())
-				continue
-			}
-
-			header, err = highlight.MakeHeader(data)
-			if err != nil {
-				screen.TermMessage("Error reading syntax header file", f.Name(), err)
-				continue
-			}
-
-			if ft == "unknown" || ft == "" {
-				if header.MatchFileName(b.Path) {
-					fnameMatches = append(fnameMatches, syntaxFileInfo{header, f.Name(), nil})
-				}
-				if len(fnameMatches) == 0 && header.MatchFileHeader(b.lines[0].data) {
-					headerMatches = append(headerMatches, syntaxFileInfo{header, f.Name(), nil})
-				}
-			} else if header.FileType == ft {
-				syntaxFile = f.Name()
-				break
-			}
+	if p := syntax.Lookup(b.Path, ft, b, detectLimit); p != nil {
+		if p.Match.FileType != "" {
+			ft = p.Match.FileType
 		}
-	}
-
-	if syntaxFile == "" {
-		matches := fnameMatches
-		if len(matches) == 0 {
-			matches = headerMatches
-		}
-
-		length := len(matches)
-		if length > 0 {
-			signatureMatch := false
-			if length > 1 {
-				// multiple matching syntax files found, try to resolve the ambiguity
-				// using signatures
-				detectlimit := util.IntOpt(b.Settings["detectlimit"])
-				lineCount := len(b.lines)
-				limit := lineCount
-				if detectlimit > 0 && lineCount > detectlimit {
-					limit = detectlimit
-				}
-
-			matchLoop:
-				for _, m := range matches {
-					if m.header.HasFileSignature() {
-						for i := 0; i < limit; i++ {
-							if m.header.MatchFileSignature(b.lines[i].data) {
-								syntaxFile = m.fileName
-								if m.syntaxDef != nil {
-									b.SyntaxDef = m.syntaxDef
-									foundDef = true
-								}
-								header = m.header
-								signatureMatch = true
-								break matchLoop
-							}
-						}
-					}
-				}
-			}
-			if length == 1 || !signatureMatch {
-				syntaxFile = matches[0].fileName
-				if matches[0].syntaxDef != nil {
-					b.SyntaxDef = matches[0].syntaxDef
-					foundDef = true
-				}
-				header = matches[0].header
-			}
-		}
-	}
-
-	if syntaxFile != "" && !foundDef {
-		// we found a syntax file using a syntax header file
-		b.SyntaxDef = findRuntimeSyntaxDef(syntaxFile, header)
-	}
-
-	if b.SyntaxDef != nil {
-		b.Settings["filetype"] = b.SyntaxDef.FileType
-	} else {
-		// search for the default file in the user's custom syntax files
-		b.SyntaxDef = findRealRuntimeSyntaxDef("default", nil)
-		if b.SyntaxDef == nil {
-			// search for the default file in the built-in syntax files
-			b.SyntaxDef = findRuntimeSyntaxDef("default", nil)
-		}
-	}
-
-	if b.SyntaxDef != nil {
-		resolveIncludes(b.SyntaxDef)
-	}
-
-	if b.SyntaxDef != nil {
-		b.Highlighter = highlight.NewHighlighter(b.SyntaxDef)
+		b.Settings["filetype"] = ft
 		if b.Settings["syntax"].(bool) {
-			go func() {
-				b.Highlighter.HighlightStates(b)
-				b.Highlighter.HighlightMatches(b, 0, b.End().Y)
-				screen.Redraw()
-			}()
+			b.attachHighlight(p, ft)
+			return
 		}
+	} else if ft != "" && ft != b.Settings["filetype"] {
+		b.Settings["filetype"] = ft
+	}
+
+	b.detachHighlight(true)
+}
+
+func (b *SharedBuffer) attachHighlight(p *syntax.Provider, ft string) {
+	if b.hl != nil && !b.hl.closed && b.hl.provider == p && b.hl.filetype == ft {
+		return
+	}
+	b.detachHighlight(false)
+	b.hlGen++
+	b.hl = &highlightSession{
+		provider: p,
+		filetype: ft,
+		cause:    syntax.CauseOpen,
+	}
+	b.ClearMatches()
+	b.scheduleHighlight()
+}
+
+func (b *SharedBuffer) detachHighlight(clear bool) {
+	if h := b.hl; h != nil {
+		if h.timer != nil {
+			h.timer.Stop()
+			h.timer = nil
+		}
+		h.closed = true
+		b.hl = nil
+	}
+	b.hlGen++
+	if clear {
+		b.ClearMatches()
+		screen.Redraw()
 	}
 }
 
-// ClearMatches clears all of the syntax highlighting for the buffer
-func (b *Buffer) ClearMatches() {
+func (b *SharedBuffer) scheduleHighlight() {
+	h := b.hl
+	if h == nil || h.closed {
+		return
+	}
+	h.dirty = true
+	if h.timer != nil {
+		return
+	}
+	run := MainThread
+	h.timer = time.AfterFunc(HighlightDebounce, func() {
+		run(func() { b.highlightTick() })
+	})
+}
+
+func (b *SharedBuffer) highlightTick() {
+	h := b.hl
+	if h == nil || h.closed {
+		return
+	}
+	h.timer = nil
+	if !h.dirty || h.inFlight {
+		return
+	}
+	if !b.Settings["syntax"].(bool) || h.provider == nil {
+		h.dirty = false
+		return
+	}
+
+	view := b.highlightView()
+	if view == nil {
+		h.dirty = false
+		return
+	}
+
+	h.dirty = false
+	h.inFlight = true
+	h.requestGen = b.hlGen
+	req := syntax.Request{
+		Buf:        view,
+		BufID:      b.hlID,
+		Path:       b.Path,
+		FileType:   h.filetype,
+		Text:       b.Text(),
+		First:      0,
+		Last:       b.LinesNum() - 1,
+		Generation: h.requestGen,
+		Cause:      h.cause,
+		Edits:      append([]syntax.Edit(nil), h.edits...),
+	}
+	h.edits = h.edits[:0]
+	h.cause = syntax.CauseEdit
+	req.Reply = func(spans []syntax.Span) {
+		b.ApplySpans(req.Generation, spans)
+	}
+	req.Fail = func(err error) {
+		if b.hl != h || h.closed || h.requestGen != req.Generation {
+			return
+		}
+		h.inFlight = false
+		h.dirty = false
+		if err != nil {
+			log.Println("syntax provider", h.provider.Name, "failed:", err)
+		}
+	}
+
+	p := h.provider
+	defer func() {
+		if r := recover(); r != nil {
+			log.Println("syntax provider", p.Name, "panic:", r)
+			b.providerPanicked(h)
+		}
+	}()
+	p.Request(req)
+}
+
+func (b *SharedBuffer) providerPanicked(h *highlightSession) {
+	if b.hl != h || h.closed {
+		return
+	}
+	h.inFlight = false
+	h.dirty = false
+	if syntax.ReportError(h.provider.Name) {
+		log.Println("syntax: disabling provider", h.provider.Name)
+		b.detachHighlight(true)
+	}
+}
+
+// ApplySpans replaces all highlighting with spans from generation gen.
+// Lines not mentioned in spans are cleared. Stale generations are dropped.
+func (b *SharedBuffer) ApplySpans(gen uint64, spans []syntax.Span) bool {
+	h := b.hl
+	if h == nil || h.closed {
+		return false
+	}
+	if gen != b.hlGen {
+		if gen == h.requestGen {
+			h.inFlight = false
+			if h.dirty {
+				b.scheduleHighlight()
+			}
+		}
+		return false
+	}
+
+	h.inFlight = false
+	h.dirty = false
+	syntax.ReportSuccess(h.provider.Name)
+
+	byLine := make(map[int][]syntax.Span)
+	for _, s := range spans {
+		if s.Line < 0 || s.Line >= b.LinesNum() || s.EndByte <= s.StartByte {
+			continue
+		}
+		byLine[s.Line] = append(byLine[s.Line], s)
+	}
+
+	for i := 0; i < b.LinesNum(); i++ {
+		if lineSpans, ok := byLine[i]; ok {
+			b.SetMatch(i, syntax.BuildMatch(b.LineBytes(i), lineSpans))
+		} else {
+			b.SetMatch(i, nil)
+		}
+	}
+
+	screen.Redraw()
+	return true
+}
+
+// InvalidateSyntax asks for fresh spans with a manual cause.
+func (b *Buffer) InvalidateSyntax() {
+	s := b.SharedBuffer
+	if s == nil {
+		return
+	}
+	if s.hl == nil || s.hl.closed {
+		s.updateProvider()
+		return
+	}
+	s.hlGen++
+	s.hl.cause = syntax.CauseManual
+	s.scheduleHighlight()
+}
+
+// RefreshSyntax re-resolves highlighting for every open buffer, usually
+// after plugins register or unregister providers.
+func RefreshSyntax() {
+	seen := make(map[*SharedBuffer]bool)
+	for _, b := range OpenBuffers {
+		if b.SharedBuffer == nil || seen[b.SharedBuffer] {
+			continue
+		}
+		seen[b.SharedBuffer] = true
+		b.UpdateProvider()
+	}
+	screen.Redraw()
+}
+
+// ClearMatches clears all of the syntax highlighting for the buffer.
+func (b *SharedBuffer) ClearMatches() {
 	for i := range b.lines {
 		b.SetMatch(i, nil)
-		b.SetState(i, nil)
 	}
+}
+
+func (b *SharedBuffer) closeHighlight() {
+	b.detachHighlight(true)
 }
 
 // IndentString returns this buffer's indent method (a tabstop or n spaces

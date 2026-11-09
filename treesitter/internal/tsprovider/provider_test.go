@@ -254,6 +254,33 @@ func TestGoSampleSpans(t *testing.T) {
 	}
 }
 
+func TestHTMLInjections(t *testing.T) {
+	text := []byte("<style>body { color: red; }</style>\n<script>const x = 1;</script>\n")
+	e := New("../../queries")
+	defer e.Close()
+
+	spans, err := e.Spans(1, "html", text)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		needle string
+		group  string
+	}{
+		{"color", "identifier"},
+		{"const", "statement"},
+		{"x", "identifier"},
+		{"1", "constant.number"},
+	}
+	for _, tc := range cases {
+		line, column := positionOf(t, string(text), tc.needle)
+		if got := groupAt(spans, line, column); got != tc.group {
+			t.Errorf("%q at %d:%d: got group %q, want %q", tc.needle, line, column, got, tc.group)
+		}
+	}
+}
+
 func TestIncrementalMatchesFullParse(t *testing.T) {
 	bases := map[string]string{
 		"go":     string(loadSample(t)),

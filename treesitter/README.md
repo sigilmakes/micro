@@ -279,11 +279,18 @@ are split across their lines.
   eventually block `JobSend` in the editor. Process supervision beyond the
   exit callback (restart with backoff, watchdog) is not implemented.
 
+## Injections
+
+The HTML grammar ships upstream `injections.scm`. The helper parses
+`<script>` content with the JavaScript grammar and `<style>` content with the
+CSS grammar, then overlays those spans on the HTML tree. Injection depth is
+limited to two so a malformed grammar cannot recurse forever.
+
 ## Known gaps
 
-- No injections or embedded languages. HTML `<script>`/`<style>` content,
-  JavaScript template substitutions inside other languages, and similar
-  regions are not highlighted by a second grammar.
+- Only HTML injections are wired. Markdown fenced code blocks, JavaScript
+  template substitutions, and other embedded-language hosts are not parsed
+  with a second grammar yet.
 - Grammars are linked at build time. There is no dynamic parser loading,
   plugin grammar registry, or runtime download.
 - Queries run over the whole document; there is no viewport or windowed
@@ -292,6 +299,6 @@ are split across their lines.
   per-provider failure recovery beyond the helper's process exit callback.
 - One helper serves all buffers. A helper crash disables highlighting until
   the plugin is reloaded.
-- No grammar manifest compiled into the helper. Distribution must provide
-  `queries/<grammar>/<query>.scm` and set `MICRO_TS_GRAMMAR_DIR`; there is no
-  compiled default path.
+- There is no runtime grammar manifest. The flake bakes a default grammar
+  directory into the helper; a plain `go build` falls back to `./queries`, and
+  `MICRO_TS_GRAMMAR_DIR` overrides both.

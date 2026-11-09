@@ -46,10 +46,11 @@ type Span struct {
 // own patterns over a base language. Filetypes are the micro filetypes from
 // pkg/filetype/table.go that this grammar serves.
 type Definition struct {
-	ID        string
-	Filetypes []string
-	Queries   []string
-	Language  func() *sitter.Language
+	ID         string
+	Filetypes  []string
+	Queries    []string
+	Injections []string
+	Language   func() *sitter.Language
 }
 
 // definitions is the linked grammar registry. Adding a language means adding
@@ -67,7 +68,7 @@ var definitions = []Definition{
 	{ID: "bash", Filetypes: []string{"shell"}, Queries: []string{"highlights.scm"}, Language: language(tsbash.Language)},
 	{ID: "json", Filetypes: []string{"json"}, Queries: []string{"highlights.scm"}, Language: language(tsjson.Language)},
 	{ID: "toml", Filetypes: []string{"toml"}, Queries: []string{"highlights.scm"}, Language: language(tstoml.Language)},
-	{ID: "html", Filetypes: []string{"html"}, Queries: []string{"highlights.scm"}, Language: language(tshtml.Language)},
+	{ID: "html", Filetypes: []string{"html"}, Queries: []string{"highlights.scm"}, Injections: []string{"injections.scm"}, Language: language(tshtml.Language)},
 	{ID: "css", Filetypes: []string{"css"}, Queries: []string{"highlights.scm"}, Language: language(tscss.Language)},
 	{ID: "lua", Filetypes: []string{"lua"}, Queries: []string{"highlights.scm"}, Language: language(tslua.Language)},
 	{ID: "yaml", Filetypes: []string{"yaml"}, Queries: []string{"highlights.scm"}, Language: language(tsyaml.Language)},
@@ -186,14 +187,19 @@ func MapCapture(name string) string {
 }
 
 type grammar struct {
-	id       string
-	parser   *sitter.Parser
-	language *sitter.Language
-	query    *sitter.Query
-	captures []string
+	id                string
+	parser            *sitter.Parser
+	language          *sitter.Language
+	query             *sitter.Query
+	captures          []string
+	injectionQuery    *sitter.Query
+	injectionCaptures []string
 }
 
 func (g *grammar) close() {
+	if g.injectionQuery != nil {
+		g.injectionQuery.Close()
+	}
 	if g.query != nil {
 		g.query.Close()
 	}
@@ -263,7 +269,129 @@ func (e *Engine) Spans(id int64, filetype string, text []byte) ([]Span, error) {
 	if err != nil {
 		return nil, err
 	}
-	return g.spans(tree, text), nil
+	return e.withInjections(g, tree, text, g.spans(tree, text), 0), nil
+}
+
+// withInjections overlays embedded languages declared by a grammar's
+// injections.scm. It is intentionally depth-limited: HTML -> JavaScript/CSS
+// is useful; recursive template languages are not worth the risk yet.
+func (e *Engine) withInjections(g *grammar, tree *sitter.Tree, text []byte, base []Span, depth int) []Span {
+	if g.injectionQuery == nil || depth >= 2 {
+		return base
+	}
+
+	cursor := sitter.NewQueryCursor()
+	defer cursor.Close()
+	matches := cursor.Matches(g.injectionQuery, tree.RootNode(), text)
+
+	var extra []Span
+	for match := matches.Next(); match != nil; match = matches.Next() {
+		language := ""
+		for _, property := range g.injectionQuery.PropertySettings(match.PatternIndex) {
+			if property.Key == "injection.language" && property.Value != nil {
+				language = *property.Value
+			}
+		}
+
+		var content *sitter.Node
+		for i := range match.Captures {
+			capture := &match.Captures[i]
+			name := ""
+			if int(capture.Index) < len(g.injectionCaptures) {
+				name = g.injectionCaptures[capture.Index]
+			}
+			switch name {
+			case "injection.content":
+				node := capture.Node
+				content = &node
+			case "injection.language":
+				if language == "" {
+					language = capture.Node.Utf8Text(text)
+				}
+			}
+		}
+		if content == nil || language == "" {
+			continue
+		}
+
+		target, err := e.grammarFor(normalizeInjectionLanguage(language))
+		if err != nil || target == g {
+			continue
+		}
+
+		childText := []byte(content.Utf8Text(text))
+		childTree := target.parser.Parse(childText, nil)
+		if childTree == nil {
+			continue
+		}
+		childSpans := target.spans(childTree, childText)
+		childSpans = e.withInjections(target, childTree, childText, childSpans, depth+1)
+		childTree.Close()
+
+		start := content.StartPosition()
+		for i := range childSpans {
+			if childSpans[i].Line == 0 {
+				childSpans[i].Start += int(start.Column)
+				childSpans[i].End += int(start.Column)
+			}
+			childSpans[i].Line += int(start.Row)
+		}
+		extra = append(extra, childSpans...)
+	}
+	return mergeSpans(base, extra)
+}
+
+func normalizeInjectionLanguage(language string) string {
+	switch language {
+	case "js", "jsx":
+		return "javascript"
+	case "ts":
+		return "typescript"
+	case "sh":
+		return "shell"
+	case "cpp":
+		return "c++"
+	}
+	return language
+}
+
+// mergeSpans overlays extra spans on top of base spans, line by line, so an
+// embedded language can replace the host language's colouring.
+func mergeSpans(base, extra []Span) []Span {
+	if len(extra) == 0 {
+		return base
+	}
+	baseByLine := make(map[int][]Span)
+	extraByLine := make(map[int][]Span)
+	for _, span := range base {
+		baseByLine[span.Line] = append(baseByLine[span.Line], span)
+	}
+	for _, span := range extra {
+		extraByLine[span.Line] = append(extraByLine[span.Line], span)
+	}
+	lineSet := make(map[int]bool, len(baseByLine)+len(extraByLine))
+	for line := range baseByLine {
+		lineSet[line] = true
+	}
+	for line := range extraByLine {
+		lineSet[line] = true
+	}
+	lines := make([]int, 0, len(lineSet))
+	for line := range lineSet {
+		lines = append(lines, line)
+	}
+	sort.Ints(lines)
+
+	var out []Span
+	for _, line := range lines {
+		painted := append([]Span(nil), baseByLine[line]...)
+		sort.SliceStable(painted, func(i, j int) bool { return painted[i].Start < painted[j].Start })
+		for _, span := range extraByLine[line] {
+			painted = paint(painted, span)
+		}
+		out = append(out, painted...)
+	}
+	return out
 }
 
 func (e *Engine) grammarFor(filetype string) (*grammar, error) {
@@ -307,19 +435,49 @@ func (e *Engine) loadGrammar(filetype string) (*grammar, error) {
 	if queryErr != nil {
 		return nil, fmt.Errorf("grammar %q query: %s", definition.ID, queryErr.Message)
 	}
+	var injectionQuery *sitter.Query
+	var injectionSources []string
+	for _, name := range definition.Injections {
+		queryPath, err := e.findQuery(definition.ID, name)
+		if err != nil {
+			query.Close()
+			return nil, err
+		}
+		querySource, err := os.ReadFile(queryPath)
+		if err != nil {
+			query.Close()
+			return nil, fmt.Errorf("read %s: %w", queryPath, err)
+		}
+		injectionSources = append(injectionSources, string(querySource))
+	}
+	if len(injectionSources) > 0 {
+		injectionQuery, queryErr = sitter.NewQuery(language, strings.Join(injectionSources, "\n"))
+		if queryErr != nil {
+			query.Close()
+			return nil, fmt.Errorf("grammar %q injection query: %s", definition.ID, queryErr.Message)
+		}
+	}
 	parser := sitter.NewParser()
 	if err := parser.SetLanguage(language); err != nil {
+		if injectionQuery != nil {
+			injectionQuery.Close()
+		}
 		query.Close()
 		parser.Close()
 		return nil, fmt.Errorf("set language %q: %w", definition.ID, err)
 	}
-	return &grammar{
+	g := &grammar{
 		id:       definition.ID,
 		parser:   parser,
 		language: language,
 		query:    query,
 		captures: query.CaptureNames(),
-	}, nil
+	}
+	if injectionQuery != nil {
+		g.injectionQuery = injectionQuery
+		g.injectionCaptures = injectionQuery.CaptureNames()
+	}
+	return g, nil
 }
 
 func (e *Engine) findQuery(grammarID, name string) (string, error) {
